@@ -281,3 +281,14 @@ class Ledger:
             )
             for row in rows
         ]
+
+    def mark_notification_delivered(self, notification_id: int, *, delivered_at: datetime) -> None:
+        self._connection.execute(
+            """
+            UPDATE notifications
+            SET state = 'delivered', delivered_at = ?
+            WHERE id = ? AND state = 'pending'
+            """,
+            (_utc_iso(delivered_at), notification_id),
+        )
+        self._connection.commit()

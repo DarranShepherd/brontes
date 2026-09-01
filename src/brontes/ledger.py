@@ -85,6 +85,15 @@ class Ledger:
                 settlement_start TEXT PRIMARY KEY,
                 unit_price_p_per_kwh TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS zappi_observations (
+                id INTEGER PRIMARY KEY,
+                observed_at TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                connected INTEGER NOT NULL,
+                charging INTEGER NOT NULL,
+                power_kw TEXT NOT NULL,
+                session_energy_kwh TEXT
+            );
             CREATE TABLE IF NOT EXISTS charging_sessions (
                 id INTEGER PRIMARY KEY,
                 opened_at TEXT NOT NULL,
@@ -158,6 +167,28 @@ class Ledger:
             (_utc_iso(settlement_start), str(unit_price_p_per_kwh)),
         )
         self._connection.commit()
+
+    def record_zappi_observation(
+        self, *, observed_at: datetime, device_id: str, connected: bool,
+        charging: bool, power_kw: Decimal, session_energy_kwh: Decimal | None,
+    ) -> None:
+        self._connection.execute(
+            """INSERT INTO zappi_observations(
+                observed_at, device_id, connected, charging, power_kw, session_energy_kwh
+            ) VALUES (?, ?, ?, ?, ?, ?)""",
+            (_utc_iso(observed_at), device_id, int(connected), int(charging), str(power_kw),
+             str(session_energy_kwh) if session_energy_kwh is not None else None),
+        )
+        self._connection.commit()
+
+    def latest_zappi_state(self) -> dict[str, object] | None:
+        row = self._connection.execute(
+            "SELECT connected, charging, power_kw FROM zappi_observations ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        return {"connected": bool(row["connected"]), "charging": bool(row["charging"]),
+                "powerKw": row["power_kw"]}
 
     def reconcile_odometer_change(
         self, *, observed_at: datetime, odometer_miles: int

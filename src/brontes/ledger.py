@@ -193,6 +193,16 @@ class Ledger:
         )
         self._connection.commit()
 
+    def unassigned_home_interval_range(self) -> tuple[datetime, datetime] | None:
+        row = self._connection.execute(
+            """SELECT MIN(started_at) AS started_at, MAX(ended_at) AS ended_at
+            FROM charging_intervals
+            WHERE location_type = 'home' AND session_id IS NULL"""
+        ).fetchone()
+        if row is None or row["started_at"] is None or row["ended_at"] is None:
+            return None
+        return _parse_utc(row["started_at"]), _parse_utc(row["ended_at"])
+
     def record_zappi_observation(
         self, *, observed_at: datetime, device_id: str, connected: bool,
         charging: bool, power_kw: Decimal, session_energy_kwh: Decimal | None,

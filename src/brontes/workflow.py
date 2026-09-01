@@ -90,6 +90,12 @@ class HomeChargingWorkflow:
         if closure is None:
             return []
         requested_at, odometer_miles = closure
+        interval_range = self._ledger.unassigned_home_interval_range()
+        if interval_range is not None:
+            try:
+                self._record_prices(*interval_range)
+            except (OSError, RuntimeError, TimeoutError):
+                return []
         try:
             sessions = self._ledger.reconcile_odometer_change(
                 observed_at=requested_at,

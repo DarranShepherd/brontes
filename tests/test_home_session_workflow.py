@@ -21,6 +21,13 @@ class _Rates:
         return prices
 
 
+class _ToggleRates(_Rates):
+    available = False
+
+    def prices_between(self, start, end):
+        return super().prices_between(start, end) if self.available else {}
+
+
 def _zappi(*, connected: bool, charging: bool, energy: str) -> ZappiTelemetry:
     return ZappiTelemetry(
         device_id="zappi-1",
@@ -60,6 +67,34 @@ class HomeSessionWorkflowTests(unittest.TestCase):
                 self.assertEqual(completed[0].energy_kwh, Decimal("4"))
                 self.assertEqual(completed[0].total_cost_gbp, Decimal("0.40"))
                 self.assertEqual(ledger.pending_notification_count(), 1)
+            finally:
+                ledger.close()
+
+    def test_unpriced_session_is_retried_after_octopus_recovers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Ledger(Path(directory) / "brontes.sqlite3")
+            try:
+                rates = _ToggleRates()
+                workflow = HomeChargingWorkflow(ledger, rates)
+                ledger.record_vehicle_observation(
+                    observed_at=datetime(2026, 9, 1, 0, 0, tzinfo=UTC),
+                    soc_percent=Decimal("50"), odometer_miles=19044,
+                )
+                workflow.process_zappi(_zappi(connected=True, charging=True, energy="0"), datetime(2026, 9, 1, 0, 0, tzinfo=UTC))
+                workflow.process_zappi(_zappi(connected=True, charging=True, energy="2"), datetime(2026, 9, 1, 0, 30, tzinfo=UTC))
+                self.assertEqual(
+                    workflow.process_zappi(_zappi(connected=False, charging=False, energy="2"), datetime(2026, 9, 1, 1, 0, tzinfo=UTC)),
+                    [],
+                )
+
+                rates.available = True
+                completed = workflow.process_zappi(
+                    _zappi(connected=False, charging=False, energy="2"),
+                    datetime(2026, 9, 1, 1, 2, tzinfo=UTC),
+                )
+
+                self.assertEqual(len(completed), 1)
+                self.assertEqual(completed[0].total_cost_gbp, Decimal("0.20"))
             finally:
                 ledger.close()
 

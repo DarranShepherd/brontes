@@ -14,7 +14,10 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from brontes.ledger import Ledger
 from brontes.myenergi import MyEnergiZappiTelemetry
+from brontes.notifications import HermesCliNotificationDispatcher
+from brontes.octopus import OctopusAgileRates
 from brontes.vw import CarConnectivityCliTelemetry
+from brontes.workflow import HomeChargingWorkflow
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -22,6 +25,13 @@ def main() -> None:
     args = parser.parse_args()
     ledger = Ledger(Path(os.environ.get("BRONTES_DATABASE_PATH", ROOT / "data/brontes.sqlite3")))
     try:
+        workflow = HomeChargingWorkflow(
+            ledger,
+            OctopusAgileRates(
+                product_code=os.environ.get("BRONTES_OCTOPUS_PRODUCT_CODE", "AGILE-24-10-01"),
+                tariff_code=os.environ.get("BRONTES_OCTOPUS_TARIFF_CODE", "E-1R-AGILE-24-10-01-B"),
+            ),
+        )
         if args.provider == "vw":
             observation = CarConnectivityCliTelemetry(
                 executable=os.environ.get(
@@ -41,18 +51,14 @@ def main() -> None:
                     "/home/hermes/workspace/scratch/carconnectivity/eu-data-act.cache",
                 ),
             ).read()
-            ledger.record_vehicle_observation(
-                observed_at=observation.source_timestamp,
-                soc_percent=observation.soc_percent,
-                odometer_miles=observation.odometer_miles,
-            )
+            workflow.process_vehicle(observation)
         else:
             observation = MyEnergiZappiTelemetry().read()
-            ledger.record_zappi_observation(
-                observed_at=datetime.now(timezone.utc), device_id=observation.device_id,
-                connected=observation.connected, charging=observation.charging,
-                power_kw=observation.power_kw, session_energy_kwh=observation.session_energy_kwh,
-            )
+            workflow.process_zappi(observation, datetime.now(timezone.utc))
+        HermesCliNotificationDispatcher(
+            ledger,
+            target=os.environ.get("BRONTES_TELEGRAM_TARGET", "telegram"),
+        ).deliver_pending()
     finally:
         ledger.close()
 

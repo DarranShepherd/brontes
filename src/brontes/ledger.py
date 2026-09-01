@@ -38,6 +38,16 @@ class PendingNotification:
     roadtrip_callback: str
 
 
+@dataclass(frozen=True)
+class ZappiObservation:
+    observed_at: datetime
+    device_id: str
+    connected: bool
+    charging: bool
+    power_kw: Decimal
+    session_energy_kwh: Decimal | None
+
+
 def _utc_iso(value: datetime) -> str:
     if value.tzinfo is None:
         raise ValueError("timestamps must be timezone-aware")
@@ -124,6 +134,11 @@ class Ledger:
                 state TEXT NOT NULL DEFAULT 'pending',
                 delivered_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS home_session_closure (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                requested_at TEXT NOT NULL,
+                odometer_miles INTEGER NOT NULL
+            );
             """
         )
         self._connection.commit()
@@ -189,6 +204,53 @@ class Ledger:
             (_utc_iso(observed_at), device_id, int(connected), int(charging), str(power_kw),
              str(session_energy_kwh) if session_energy_kwh is not None else None),
         )
+        self._connection.commit()
+
+    def latest_zappi_observation(self) -> ZappiObservation | None:
+        row = self._connection.execute(
+            """SELECT observed_at, device_id, connected, charging, power_kw, session_energy_kwh
+            FROM zappi_observations ORDER BY id DESC LIMIT 1"""
+        ).fetchone()
+        if row is None:
+            return None
+        return ZappiObservation(
+            observed_at=_parse_utc(row["observed_at"]),
+            device_id=row["device_id"],
+            connected=bool(row["connected"]),
+            charging=bool(row["charging"]),
+            power_kw=_decimal(row["power_kw"]),
+            session_energy_kwh=(
+                _decimal(row["session_energy_kwh"])
+                if row["session_energy_kwh"] is not None
+                else None
+            ),
+        )
+
+    def latest_vehicle_odometer(self) -> int | None:
+        row = self._connection.execute(
+            "SELECT odometer_miles FROM vehicle_observations ORDER BY observed_at DESC LIMIT 1"
+        ).fetchone()
+        return int(row["odometer_miles"]) if row is not None else None
+
+    def request_home_session_closure(self, *, requested_at: datetime, odometer_miles: int) -> None:
+        self._connection.execute(
+            """INSERT INTO home_session_closure(id, requested_at, odometer_miles)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO NOTHING""",
+            (_utc_iso(requested_at), odometer_miles),
+        )
+        self._connection.commit()
+
+    def requested_home_session_closure(self) -> tuple[datetime, int] | None:
+        row = self._connection.execute(
+            "SELECT requested_at, odometer_miles FROM home_session_closure WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            return None
+        return _parse_utc(row["requested_at"]), int(row["odometer_miles"])
+
+    def clear_home_session_closure(self) -> None:
+        self._connection.execute("DELETE FROM home_session_closure WHERE id = 1")
         self._connection.commit()
 
     def latest_zappi_state(self) -> dict[str, object] | None:

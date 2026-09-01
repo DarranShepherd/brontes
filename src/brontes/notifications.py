@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from datetime import datetime, timezone
+from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -47,3 +49,40 @@ class HermesNotificationDispatcher:
             )
             delivered += 1
         return delivered
+
+
+class HermesCliNotificationDispatcher:
+    """Deliver persisted notifications through the configured Hermes Telegram route."""
+
+    def __init__(
+        self,
+        ledger: Ledger,
+        *,
+        target: str = "telegram",
+        run: Callable[[list[str]], str] | None = None,
+    ) -> None:
+        self._ledger = ledger
+        self._target = target
+        self._run = run or self._run_command
+
+    def deliver_pending(self) -> int:
+        delivered = 0
+        for notification in self._ledger.pending_notifications():
+            try:
+                result = json.loads(
+                    self._run(["hermes", "send", "--to", self._target, "--json", notification.message])
+                )
+            except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+                continue
+            if not isinstance(result, dict) or result.get("success") is not True:
+                continue
+            self._ledger.mark_notification_delivered(
+                notification.id, delivered_at=datetime.now(timezone.utc)
+            )
+            delivered += 1
+        return delivered
+
+    @staticmethod
+    def _run_command(command: list[str]) -> str:
+        result = subprocess.run(command, check=True, text=True, capture_output=True, timeout=30)
+        return result.stdout

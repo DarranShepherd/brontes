@@ -48,9 +48,27 @@ Non-secret behaviour is configured through environment variables. Integration cr
 | `BRONTES_HOST` | `127.0.0.1` | Local API bind host |
 | `BRONTES_PORT` | `8088` | Local API port |
 | `BRONTES_HERMES_NOTIFICATION_URL` | unset | Local Hermes-mediated notification endpoint |
-| `BRONTES_ROADTRIP_CALLBACK_BASE_URL` | `roadtrip://x-callback-url/addFuel` | Road Trip callback base URL |
+| `BRONTES_OCTOPUS_PRODUCT_CODE` | `AGILE-24-10-01` | Octopus Agile product used for settlement pricing |
+| `BRONTES_OCTOPUS_TARIFF_CODE` | `E-1R-AGILE-24-10-01-B` | Octopus Agile regional tariff used for settlement pricing |
+| `BRONTES_TELEGRAM_TARGET` | `telegram` | Hermes notification target for completed sessions |
 
 The `BRONTES_HERMES_NOTIFICATION_URL` must be a local, authenticated Hermes gateway or bridge endpoint. It is not a Telegram Bot API token or a public endpoint. Configuration and account setup remain an explicit deployment step.
+
+## Automatic home charging workflow
+
+The recurring Zappi poll records meter-counter deltas as home charging
+intervals and retrieves the matching public Octopus Agile settlement prices.
+Budget Charge pauses remain separate intervals under one logical session.
+Brontes finalises and queues that logical session only when either:
+
+- Zappi changes from connected to disconnected; or
+- a fresh VW observation reports an increased odometer.
+
+It deliberately does **not** close a session merely because charging pauses or
+the SoC reaches 80%, because Budget Charge may resume later and the configured
+vehicle limit can differ. Pending notifications are persisted, then delivered
+through `hermes send` to the configured Telegram target; a failed delivery
+remains pending for retry by the next poll.
 
 ## Road Trip handoff
 

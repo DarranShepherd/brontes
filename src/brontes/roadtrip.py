@@ -1,11 +1,21 @@
 """Road Trip x-callback-url generation."""
 
 from base64 import urlsafe_b64encode
+from datetime import datetime
 from decimal import Decimal
 from urllib.parse import quote, urlencode, urlsplit
+from zoneinfo import ZoneInfo
 
 DEFAULT_HANDOFF_PAGE_URL = "https://darranshepherd.github.io/brontes/roadtrip/"
 DEFAULT_VEHICLE_NAME = "Volkswagen ID.Buzz GTX"
+LONDON = ZoneInfo("Europe/London")
+
+
+def _roadtrip_local_timestamp(timestamp: str) -> str:
+    parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("Road Trip callback timestamps must include a timezone")
+    return parsed.astimezone(LONDON).strftime("%Y-%m-%d %H:%M")
 
 
 def create_charge_callback(
@@ -23,7 +33,7 @@ def create_charge_callback(
             "vehicle": vehicle_name,
             "fillAmount": str(energy_kwh),
             "cost": str(total_cost_gbp),
-            "date": timestamp,
+            "date": _roadtrip_local_timestamp(timestamp),
             "odometer": str(odometer_miles),
             "notes": notes,
         },

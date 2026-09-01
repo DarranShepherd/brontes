@@ -12,7 +12,7 @@ This initial milestone provides a production-shaped, dependency-light Python ser
 - read-only adapter boundaries for VW EU Data Act, MyEnergi Zappi and Octopus Agile;
 - deterministic home-session detection, interval metering and Agile settlement-period costing;
 - odometer-based aggregation of home charging into a logical session;
-- Road Trip `x-callback-url` creation and a durable Hermes-notification outbox;
+- Road Trip `x-callback-url` creation, HTTPS handoff and a durable Hermes-notification outbox;
 - a local HTTP/JSON API for status, observation ingestion and notification delivery.
 
 No secret, vehicle-control or MyEnergi schedule-write path is enabled in this milestone. The service never sends a notification until a configured Hermes notification endpoint accepts it.
@@ -51,6 +51,28 @@ Non-secret behaviour is configured through environment variables. Integration cr
 | `BRONTES_ROADTRIP_CALLBACK_BASE_URL` | `roadtrip://x-callback-url/addFuel` | Road Trip callback base URL |
 
 The `BRONTES_HERMES_NOTIFICATION_URL` must be a local, authenticated Hermes gateway or bridge endpoint. It is not a Telegram Bot API token or a public endpoint. Configuration and account setup remain an explicit deployment step.
+
+## Road Trip handoff
+
+Telegram will not make a custom `desroadtrip://` URL tappable. The repository
+therefore includes a minimal static handoff page at
+`site/roadtrip/index.html`, deployed by `.github/workflows/deploy-pages.yml`.
+
+Brontes wraps each Road Trip callback in an HTTPS link to that page. The
+callback itself is Base64URL-encoded in the URL fragment, which browsers do
+not send to GitHub Pages. The static page decodes only valid Road Trip
+`x-callback-url` callbacks and opens the local Road Trip app. No credentials,
+ledger data or per-session pages are published to the repository or Pages.
+
+The expected public handoff address is:
+
+```text
+https://darranshepherd.github.io/brontes/roadtrip/
+```
+
+Before the first deployment, set the repository's **Settings → Pages → Build
+and deployment → Source** to **GitHub Actions**. This is a deliberate
+repository setting and is not changed by the workflow itself.
 
 ## Local API
 

@@ -1,7 +1,7 @@
 import unittest
 from decimal import Decimal
 
-from brontes.roadtrip import create_charge_callback
+from brontes.roadtrip import create_charge_callback, create_handoff_url
 
 
 class RoadTripCallbackTests(unittest.TestCase):
@@ -16,10 +16,22 @@ class RoadTripCallbackTests(unittest.TestCase):
 
         self.assertEqual(
             callback,
-            "roadtrip://x-callback-url/addFuel?"
-            "amount=24.8&cost=2.17&date=2026-09-01T06%3A45%3A00Z&"
+            "desroadtrip://x-callback-url/addFuel?"
+            "fillAmount=24.8&cost=2.17&date=2026-09-01T06%3A45%3A00Z&"
             "odometer=18742&notes=Home+%C2%B7+Zappi+%C2%B7+Agile",
         )
+
+    def test_handoff_url_keeps_callback_out_of_the_https_request(self) -> None:
+        callback = "desroadtrip://x-callback-url/addFuel?fillAmount=24.8&cost=2.17"
+
+        handoff = create_handoff_url(
+            callback,
+            handoff_page_url="https://darranshepherd.github.io/brontes/roadtrip/",
+        )
+
+        self.assertTrue(handoff.startswith("https://darranshepherd.github.io/brontes/roadtrip/#"))
+        self.assertNotIn("desroadtrip", handoff.removesuffix(handoff.split("#", 1)[1]))
+        self.assertNotIn("fillAmount", handoff.removesuffix(handoff.split("#", 1)[1]))
 
 
 if __name__ == "__main__":

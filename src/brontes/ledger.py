@@ -6,10 +6,13 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
-from html import escape
 from pathlib import Path
 
-from brontes.roadtrip import create_charge_callback
+from brontes.roadtrip import (
+    DEFAULT_HANDOFF_PAGE_URL,
+    create_charge_callback,
+    create_handoff_url,
+)
 
 UTC = timezone.utc
 MONEY = Decimal("0.01")
@@ -52,8 +55,14 @@ def _decimal(value: str | Decimal) -> Decimal:
 class Ledger:
     """Persist observations before deriving costed charging sessions."""
 
-    def __init__(self, database_path: Path) -> None:
+    def __init__(
+        self,
+        database_path: Path,
+        *,
+        roadtrip_handoff_page_url: str = DEFAULT_HANDOFF_PAGE_URL,
+    ) -> None:
         database_path.parent.mkdir(parents=True, exist_ok=True)
+        self._roadtrip_handoff_page_url = roadtrip_handoff_page_url
         self._connection = sqlite3.connect(database_path)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
@@ -239,12 +248,16 @@ class Ledger:
             odometer_miles=odometer_miles,
             notes="Home · Zappi · Agile",
         )
+        handoff_url = create_handoff_url(
+            callback,
+            handoff_page_url=self._roadtrip_handoff_page_url,
+        )
         message = (
             "Buzz charge complete\n\n"
             f"{total_energy} kWh\n£{total_cost} total\n"
             f"{weighted_price}p/kWh\n\n"
             f"Odometer: {odometer_miles:,} miles\nHome · Zappi · Agile\n\n"
-            f'<a href="{escape(callback, quote=True)}">Add to Road Trip</a>'
+            f'<a href="{handoff_url}">Add to Road Trip</a>'
         )
         self._connection.execute(
             """

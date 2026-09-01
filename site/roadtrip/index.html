@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Opening Road Trip…</title>
+  <style>
+    body { background: #111827; color: #f9fafb; font: 16px system-ui, sans-serif; margin: 0; }
+    main { max-width: 34rem; margin: 20vh auto; padding: 2rem; text-align: center; }
+    a { color: #93c5fd; }
+  </style>
+</head>
+<body>
+  <main>
+    <p id="status">Opening Road Trip…</p>
+    <p><a id="open" hidden>Open Road Trip</a></p>
+  </main>
+  <script>
+    (() => {
+      const status = document.getElementById("status");
+      const open = document.getElementById("open");
+      const encoded = window.location.hash.slice(1);
+      if (!/^[A-Za-z0-9_-]+$/.test(encoded)) {
+        status.textContent = "This Road Trip link is invalid.";
+        return;
+      }
+      try {
+        const padding = "=".repeat((4 - (encoded.length % 4)) % 4);
+        const callback = atob(encoded.replace(/-/g, "+").replace(/_/g, "/") + padding);
+        if (!callback.startsWith("desroadtrip://x-callback-url/")) {
+          throw new Error("unexpected callback scheme");
+        }
+        open.href = callback;
+        open.hidden = false;
+        window.location.assign(callback);
+      } catch (_) {
+        status.textContent = "This Road Trip link is invalid.";
+      }
+    })();
+  </script>
+</body>
+</html>

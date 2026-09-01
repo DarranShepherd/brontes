@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import Callable
 
 from brontes.ledger import Ledger
+from brontes.notifications import HermesNotificationDispatcher
 
 StartResponse = Callable[[str, list[tuple[str, str]]], None]
 
@@ -25,7 +26,9 @@ def _json_response(start_response: StartResponse, status: str, payload: dict[str
     return [body]
 
 
-def create_application(ledger: Ledger):
+def create_application(
+    ledger: Ledger, notification_dispatcher: HermesNotificationDispatcher | None = None
+):
     """Create a WSGI app without exposing the database or credentials."""
 
     def application(environ: dict[str, object], start_response: StartResponse) -> list[bytes]:
@@ -35,7 +38,11 @@ def create_application(ledger: Ledger):
             return _json_response(
                 start_response,
                 "200 OK",
-                {"service": "brontes", "status": "ok", "notificationDeliveryConfigured": False},
+                {
+                    "service": "brontes",
+                    "status": "ok",
+                    "notificationDeliveryConfigured": notification_dispatcher is not None,
+                },
             )
         if method == "GET" and path == "/status":
             return _json_response(
@@ -81,6 +88,18 @@ def create_application(ledger: Ledger):
                             for session in sessions
                         ]
                     },
+                )
+            if path == "/notifications/deliver":
+                if notification_dispatcher is None:
+                    return _json_response(
+                        start_response,
+                        "409 Conflict",
+                        {"error": "Hermes notification delivery is not configured"},
+                    )
+                return _json_response(
+                    start_response,
+                    "200 OK",
+                    {"delivered": notification_dispatcher.deliver_pending()},
                 )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             return _json_response(start_response, "400 Bad Request", {"error": str(error)})

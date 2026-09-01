@@ -194,12 +194,6 @@ class Ledger:
         self, *, observed_at: datetime, odometer_miles: int
     ) -> list[ChargingSession]:
         """Close unassigned home intervals after a later odometer observation."""
-        latest = self._connection.execute(
-            "SELECT odometer_miles FROM vehicle_observations ORDER BY observed_at DESC LIMIT 1"
-        ).fetchone()
-        if latest is not None and odometer_miles <= latest["odometer_miles"]:
-            return []
-
         intervals = self._connection.execute(
             """
             SELECT * FROM charging_intervals

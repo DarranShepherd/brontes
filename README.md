@@ -1,121 +1,181 @@
 # Brontes
 
-A deterministic, local-first charging ledger and policy service for a VW ID.Buzz.
+A deterministic, local-first charging ledger for a Volkswagen ID.Buzz. Brontes
+observes and reconciles charging; Hermes interprets requests and delivers
+notifications.
 
 > **Hermes interprets and communicates. Brontes decides, records and reconciles.**
 
-## Phase 1: read-only foundation
+## Current implementation
 
-This initial milestone provides a production-shaped, dependency-light Python service with:
+The implemented home-charging path is read-only with respect to the vehicle and
+MyEnergi:
 
-- SQLite persistence for vehicle observations, Zappi observations, charge intervals and sessions;
-- read-only adapter boundaries for VW EU Data Act, MyEnergi Zappi and Octopus Agile;
-- deterministic home-session detection, interval metering and Agile settlement-period costing;
-- odometer-based aggregation of home charging into a logical session;
-- Road Trip `x-callback-url` creation, HTTPS handoff and a durable Hermes-notification outbox;
-- a local HTTP/JSON API for status, observation ingestion and notification delivery.
+- Volkswagen telemetry is read through the existing CarConnectivity VW EU Data
+  Act CLI.
+- MyEnergi Zappi telemetry is read with Digest authentication using the
+  `myenergi_api` entry in `~/.netrc`.
+- Zappi meter-counter deltas are persisted as home charging intervals in a
+  local SQLite ledger.
+- Public Octopus Agile half-hour settlement prices are stored alongside those
+  intervals and used for cost calculation.
+- Budget Charge pauses remain separate intervals in one unassigned logical
+  home session.
+- A session is finalised after the Buzz is unplugged from Zappi or a fresh VW
+  observation reports that its odometer has increased.
+- Finalisation queues a durable notification. The next provider poll sends it
+  with `hermes send --to telegram`; it is marked delivered only after Hermes
+  reports success.
+- Road Trip entries use the vehicle name `Volkswagen ID.Buzz GTX`, a
+  Europe/London local `YYYY-MM-DD HH:MM` timestamp, and an HTTPS handoff that
+  Telegram can open.
 
-No secret, vehicle-control or MyEnergi schedule-write path is enabled in this milestone. The service never sends a notification until a configured Hermes notification endpoint accepts it.
+The service does not currently control Volkswagen, Zappi, MyEnergi schedules,
+or Telegram directly. It does not use an LLM in its decision path.
 
-## Architecture
+## Home-session lifecycle
 
 ```text
-adapters (read-only) -> SQLite ledger -> deterministic services -> API/outbox
-                                                 |
-                                       Road Trip callback + Hermes event
+Zappi poll every 2 minutes
+  -> persist connected/charging/power/meter counter observation
+  -> persist positive counter delta as a home interval
+  -> retrieve and persist matching Agile settlement prices
+
+Budget Charge pause/resume
+  -> retain all intervals in the same unassigned logical session
+
+Zappi unplugged OR later VW odometer increase
+  -> aggregate all unassigned home intervals
+  -> calculate cost from recorded Agile prices
+  -> persist charging session and pending notification
+  -> send Telegram Road Trip handoff
 ```
 
-All timestamps are stored in UTC. The API serialises ISO-8601 timestamps with a `Z` suffix.
+A stopped charge or an SoC of 80% is deliberately **not** a completion trigger.
+A Budget Charge session may resume after a price gap, and the configured vehicle
+limit may be above 80%. If Octopus pricing is unavailable, finalisation remains
+pending and subsequent polls retry it; no unpriced session is silently sent.
 
-## Quick start
+## Polling and persistence
 
-Brontes targets Python 3.13+ and intentionally uses only the standard library for the initial foundation.
+The repository contains the one-shot poll entry point:
 
 ```bash
-python3 -m unittest discover -s tests -v
-python3 -m brontes
+python3 scripts/poll.py --provider zappi
+python3 scripts/poll.py --provider vw
 ```
 
-The server listens on `127.0.0.1:8088` by default. Set `BRONTES_DATABASE_PATH` to select a SQLite file; otherwise it uses `./data/brontes.sqlite3`.
+The current host installation runs these through local scheduler jobs:
 
-## Configuration
+| Provider | Frequency | Behaviour |
+| --- | ---: | --- |
+| Zappi | every 2 minutes | Read telemetry, process home intervals, retry finalisation and notifications. |
+| VW EU Data Act | every 15 minutes | Read vehicle telemetry, close eligible home sessions after odometer movement, retry notifications. |
 
-Non-secret behaviour is configured through environment variables. Integration credentials are read from the user's `~/.netrc`, never from source-controlled files or environment variables. Brontes will use explicit, documented machine names per adapter; it does not log, return, or copy credential values. MyEnergi credentials already use this store. Ask the operator to add any new machine entry before enabling a new live adapter.
+Both jobs are read-only against their providers. The scheduler configuration is
+host-specific and intentionally not committed to this public repository.
 
-| Variable | Default | Purpose |
+SQLite defaults to `data/brontes.sqlite3`; it is ignored by Git. SQLite is the
+source of truth for observations, intervals, costs, sessions and notification
+delivery state. This makes poll retries and restarts idempotent provided the
+same ledger is retained.
+
+## Configuration and credentials
+
+Brontes uses Python 3.13+ and only the standard library. Credentials are never
+committed or read from configuration files in this repository.
+
+| Variable | Default | Used by |
 | --- | --- | --- |
-| `BRONTES_DATABASE_PATH` | `data/brontes.sqlite3` | SQLite ledger path |
-| `BRONTES_HOST` | `127.0.0.1` | Local API bind host |
-| `BRONTES_PORT` | `8088` | Local API port |
-| `BRONTES_HERMES_NOTIFICATION_URL` | unset | Local Hermes-mediated notification endpoint |
-| `BRONTES_OCTOPUS_PRODUCT_CODE` | `AGILE-24-10-01` | Octopus Agile product used for settlement pricing |
-| `BRONTES_OCTOPUS_TARIFF_CODE` | `E-1R-AGILE-24-10-01-B` | Octopus Agile regional tariff used for settlement pricing |
-| `BRONTES_TELEGRAM_TARGET` | `telegram` | Hermes notification target for completed sessions |
+| `BRONTES_DATABASE_PATH` | `data/brontes.sqlite3` | API and poll entry point |
+| `BRONTES_HOST` | `127.0.0.1` | Local HTTP API |
+| `BRONTES_PORT` | `8088` | Local HTTP API |
+| `BRONTES_HERMES_NOTIFICATION_URL` | unset | Optional HTTP notification bridge for the local API |
+| `BRONTES_OCTOPUS_PRODUCT_CODE` | `AGILE-24-10-01` | Poll entry point |
+| `BRONTES_OCTOPUS_TARIFF_CODE` | `E-1R-AGILE-24-10-01-B` | Poll entry point |
+| `BRONTES_TELEGRAM_TARGET` | `telegram` | Poll entry point |
+| `BRONTES_CARCONNECTIVITY_CLI` | host installation default | VW poll entry point |
+| `BRONTES_CARCONNECTIVITY_CONFIG` | host installation default | VW poll entry point |
+| `BRONTES_CARCONNECTIVITY_TOKEN` | host installation default | VW poll entry point |
+| `BRONTES_CARCONNECTIVITY_CACHE` | host installation default | VW poll entry point |
 
-The `BRONTES_HERMES_NOTIFICATION_URL` must be a local, authenticated Hermes gateway or bridge endpoint. It is not a Telegram Bot API token or a public endpoint. Configuration and account setup remain an explicit deployment step.
+The MyEnergi adapter requires a `~/.netrc` machine named `myenergi_api`, where
+the login is the hub identifier and the password is the MyEnergi API key. Do
+not copy, print or commit its values. The CarConnectivity VW configuration and
+its token/cache remain outside the Brontes repository.
 
-## Automatic home charging workflow
-
-The recurring Zappi poll records meter-counter deltas as home charging
-intervals and retrieves the matching public Octopus Agile settlement prices.
-Budget Charge pauses remain separate intervals under one logical session.
-Brontes finalises and queues that logical session only when either:
-
-- Zappi changes from connected to disconnected; or
-- a fresh VW observation reports an increased odometer.
-
-It deliberately does **not** close a session merely because charging pauses or
-the SoC reaches 80%, because Budget Charge may resume later and the configured
-vehicle limit can differ. Pending notifications are persisted, then delivered
-through `hermes send` to the configured Telegram target; a failed delivery
-remains pending for retry by the next poll.
+The documented default Agile tariff is the current configured tariff for this
+installation. Set the product and tariff environment variables if the account's
+Agile tariff changes; incorrect tariff configuration produces incorrect costs.
 
 ## Road Trip handoff
 
-Telegram will not make a custom `desroadtrip://` URL tappable. The repository
-therefore includes a minimal static handoff page at
-`site/roadtrip/index.html`, deployed by `.github/workflows/deploy-pages.yml`.
-
-Brontes wraps each Road Trip callback in an HTTPS link to that page. The
-callback itself is Base64URL-encoded in the URL fragment, which browsers do
-not send to GitHub Pages. The static page decodes only valid Road Trip
-`x-callback-url` callbacks and opens the local Road Trip app. No credentials,
-ledger data or per-session pages are published to the repository or Pages.
-
-The expected public handoff address is:
+Road Trip does not reliably open `desroadtrip://` links directly from Telegram.
+Brontes instead generates an HTTPS link to the static GitHub Pages handoff:
 
 ```text
 https://darranshepherd.github.io/brontes/roadtrip/
 ```
 
-Before the first deployment, set the repository's **Settings → Pages → Build
-and deployment → Source** to **GitHub Actions**. This is a deliberate
-repository setting and is not changed by the workflow itself.
+The Road Trip callback is Base64URL encoded in the URL fragment. Fragments are
+not sent to GitHub Pages, so charge values and callback data are not published
+in page requests or server logs. The static page validates that a decoded value
+is a Road Trip `x-callback-url` before opening it locally.
 
-## Local API
+The callback includes:
 
-- `GET /health` — service, ledger and integration configuration health.
-- `GET /status` — current vehicle/Zappi state and pending notifications.
-- `POST /observations/vehicle` — persist a validated VW-derived observation.
-- `POST /observations/zappi` — persist a validated Zappi-derived observation and process home intervals.
-- `POST /reconcile/odometer` — close eligible home sessions when the vehicle has been driven.
-- `POST /notifications/deliver` — try delivery of persisted pending notifications.
+- `vehicle=Volkswagen%20ID.Buzz%20GTX`;
+- authoritative ledger energy, cost and odometer values;
+- the session closure timestamp converted to `Europe/London`; and
+- `Home · Zappi · Agile` provenance notes.
 
-The ingestion endpoints are deliberately generic. The next milestone wires the live, read-only VW EU Data Act and MyEnergi polling clients to them.
+The Pages workflow is in `.github/workflows/deploy-pages.yml`; GitHub Pages
+must use **Settings → Pages → Build and deployment → GitHub Actions**.
 
-## Safety and operational boundaries
+## Local HTTP API
 
-- Brontes does not use an LLM in its decision path.
-- Observation data is committed before derived sessions and notifications are created.
-- Notification failure never changes charge correctness; messages remain pending for later retry.
-- The local API binds to loopback by default.
-- Do not commit credentials or session state.
+Run the loopback API with:
+
+```bash
+PYTHONPATH=src python3 -m brontes
+```
+
+It listens on `127.0.0.1:8088` by default. It is a separate, intentionally
+narrow integration surface and does not start the provider pollers.
+
+| Endpoint | Current behaviour |
+| --- | --- |
+| `GET /health` | Reports service status and whether the optional HTTP notification bridge is configured. |
+| `GET /status` | Reports the count of pending notifications. |
+| `POST /observations/zappi` | Records a validated, already-derived home interval. |
+| `POST /prices/agile` | Records an Agile settlement price. |
+| `POST /reconcile/odometer` | Reconciles eligible unassigned home intervals at a supplied odometer reading. |
+| `POST /notifications/deliver` | Delivers pending notifications through the optional HTTP bridge, if configured. |
+
+The API does not yet expose raw provider polling, detailed status/health, manual
+charge reports, away charging, or MyEnergi schedule operations.
+
+## Safety, limitations and next work
+
+- Persisted observations and intervals are committed before sessions and
+  notifications are derived.
+- Notification failure does not change charging or accounting state; delivery
+  remains pending for a later poll.
+- Counter deltas are allocated proportionally across their observation window
+  when calculating half-hour Agile costs. The calculation is therefore bounded
+  by the 2-minute Zappi polling cadence rather than exact sub-minute metering.
+- The initial scope is home charging only. Away AC/DC detection, manual
+  reconciliation, single-charge protection and control paths are not yet
+  implemented.
+- The local API binds to loopback by default. Do not expose it publicly or
+  commit credentials, token/cache files or SQLite ledger data.
+
+See [ROADMAP.md](ROADMAP.md) for delivered work, remaining work and acceptance
+criteria.
 
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -v
-python3 -m compileall -q src
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+python3 -m compileall -q src scripts
 ```
-
-See [ROADMAP.md](ROADMAP.md) for planned increments and verification criteria.

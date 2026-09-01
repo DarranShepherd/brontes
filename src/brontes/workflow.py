@@ -57,6 +57,10 @@ class HomeChargingWorkflow:
             )
         return self._finalize_requested_session()
 
+    def reconcile_pending(self) -> list[ChargingSession]:
+        """Retry a previously requested closure after a transient dependency failure."""
+        return self._finalize_requested_session()
+
     def _record_energy_delta(
         self,
         previous: ZappiObservation,

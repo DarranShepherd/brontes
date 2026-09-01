@@ -10,6 +10,8 @@
   authentication, including connection state, charging state, power and charge
   energy counter.
 - [x] Scheduled host polling: Zappi every 2 minutes and VW every 15 minutes.
+- [x] Single `brontes` CLI for polling, reconciliation, local status and the
+  optional HTTP API; scheduler wrappers contain no business logic.
 - [x] Durable raw vehicle and Zappi observations.
 - [x] Zappi meter-counter deltas persisted as idempotent, metered home charging
   intervals.
@@ -54,7 +56,7 @@ all schedule writes are auditable and verified by a fresh read.
 
 ## Next — operational hardening
 
-- [ ] Replace host-specific CarConnectivity default paths in `scripts/poll.py`
+- [ ] Replace host-specific CarConnectivity default paths in the CLI
   with an explicit credential-free deployment configuration or installation
   wrapper.
 - [ ] Add a systemd service/timer option and restart-recovery runbook, while

@@ -58,12 +58,29 @@ pending and subsequent polls retry it; no unpriced session is silently sent.
 
 ## Polling and persistence
 
-The repository contains the one-shot poll entry point:
+The installed Brontes executable is the single entry point for scheduled and
+interactive operations:
 
 ```bash
-python3 scripts/poll.py --provider zappi
-python3 scripts/poll.py --provider vw
+brontes poll zappi
+brontes poll vw
+brontes reconcile
+brontes status
 ```
+
+For a source checkout, install the project into its local virtual environment:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install --editable .
+```
+
+`poll zappi` and `poll vw` read one provider, apply the shared deterministic
+workflow and retry pending notification delivery. `reconcile` retries a
+previously requested session closure without contacting either provider. All
+three commands emit a compact JSON result on standard output. The former
+`scripts/poll.py` is retained only as a compatibility shim and contains no
+workflow logic.
 
 The current host installation runs these through local scheduler jobs:
 
@@ -72,8 +89,9 @@ The current host installation runs these through local scheduler jobs:
 | Zappi | every 2 minutes | Read telemetry, process home intervals, retry finalisation and notifications. |
 | VW EU Data Act | every 15 minutes | Read vehicle telemetry, close eligible home sessions after odometer movement, retry notifications. |
 
-Both jobs are read-only against their providers. The scheduler configuration is
-host-specific and intentionally not committed to this public repository.
+Both jobs are read-only against their providers. The host scheduler invokes `brontes poll zappi` and `brontes poll vw` through
+minimal wrappers. Scheduler configuration is host-specific and intentionally
+not committed to this public repository.
 
 SQLite defaults to `data/brontes.sqlite3`; it is ignored by Git. SQLite is the
 source of truth for observations, intervals, costs, sessions and notification
@@ -132,16 +150,17 @@ The callback includes:
 The Pages workflow is in `.github/workflows/deploy-pages.yml`; GitHub Pages
 must use **Settings → Pages → Build and deployment → GitHub Actions**.
 
-## Local HTTP API
+## Optional local HTTP API
 
 Run the loopback API with:
 
 ```bash
-PYTHONPATH=src python3 -m brontes
+brontes serve
 ```
 
-It listens on `127.0.0.1:8088` by default. It is a separate, intentionally
-narrow integration surface and does not start the provider pollers.
+It listens on `127.0.0.1:8088` by default. It is intentionally optional and
+does not start the provider pollers. Hermes should use the CLI for normal local
+status reads and controlled operations until a richer API is justified.
 
 | Endpoint | Current behaviour |
 | --- | --- |

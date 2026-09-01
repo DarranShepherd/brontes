@@ -6,6 +6,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
+from html import escape
 from pathlib import Path
 
 from brontes.roadtrip import create_charge_callback
@@ -243,7 +244,7 @@ class Ledger:
             f"{total_energy} kWh\n£{total_cost} total\n"
             f"{weighted_price}p/kWh\n\n"
             f"Odometer: {odometer_miles:,} miles\nHome · Zappi · Agile\n\n"
-            f"Add to Road Trip\n{callback}"
+            f'<a href="{escape(callback, quote=True)}">Add to Road Trip</a>'
         )
         self._connection.execute(
             """

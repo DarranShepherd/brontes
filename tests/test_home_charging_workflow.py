@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
+from html import escape
 from pathlib import Path
 
 from brontes.ledger import Ledger
@@ -63,6 +64,10 @@ class HomeChargingWorkflowTests(unittest.TestCase):
         self.assertIn("roadtrip://x-callback-url/addFuel?", pending[0].roadtrip_callback)
         self.assertIn("24.8 kWh", pending[0].message)
         self.assertIn("£2.17", pending[0].message)
+        self.assertIn(
+            f'<a href="{escape(pending[0].roadtrip_callback, quote=True)}">Add to Road Trip</a>',
+            pending[0].message,
+        )
 
     def test_repeated_zappi_interval_source_key_does_not_double_count(self) -> None:
         self.ledger.record_home_interval(

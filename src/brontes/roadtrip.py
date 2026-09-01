@@ -2,7 +2,7 @@
 
 from base64 import urlsafe_b64encode
 from decimal import Decimal
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 DEFAULT_HANDOFF_PAGE_URL = "https://darranshepherd.github.io/brontes/roadtrip/"
 DEFAULT_VEHICLE_NAME = "Volkswagen ID.Buzz GTX"
@@ -26,7 +26,8 @@ def create_charge_callback(
             "date": timestamp,
             "odometer": str(odometer_miles),
             "notes": notes,
-        }
+        },
+        quote_via=quote,
     )
     return f"desroadtrip://x-callback-url/addFuel?{query}"
 

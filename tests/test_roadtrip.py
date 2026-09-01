@@ -17,8 +17,8 @@ class RoadTripCallbackTests(unittest.TestCase):
         self.assertEqual(
             callback,
             "desroadtrip://x-callback-url/addFuel?"
-            "vehicle=Volkswagen+ID.Buzz+GTX&fillAmount=24.8&cost=2.17&date=2026-09-01T06%3A45%3A00Z&"
-            "odometer=18742&notes=Home+%C2%B7+Zappi+%C2%B7+Agile",
+            "vehicle=Volkswagen%20ID.Buzz%20GTX&fillAmount=24.8&cost=2.17&date=2026-09-01T06%3A45%3A00Z&"
+            "odometer=18742&notes=Home%20%C2%B7%20Zappi%20%C2%B7%20Agile",
         )
 
     def test_handoff_url_keeps_callback_out_of_the_https_request(self) -> None:

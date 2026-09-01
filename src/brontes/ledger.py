@@ -282,6 +282,12 @@ class Ledger:
             for row in rows
         ]
 
+    def pending_notification_count(self) -> int:
+        row = self._connection.execute(
+            "SELECT COUNT(*) AS count FROM notifications WHERE state = 'pending'"
+        ).fetchone()
+        return int(row["count"])
+
     def mark_notification_delivered(self, notification_id: int, *, delivered_at: datetime) -> None:
         self._connection.execute(
             """

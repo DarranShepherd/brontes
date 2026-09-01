@@ -5,6 +5,7 @@ from decimal import Decimal
 from urllib.parse import urlencode, urlsplit
 
 DEFAULT_HANDOFF_PAGE_URL = "https://darranshepherd.github.io/brontes/roadtrip/"
+DEFAULT_VEHICLE_NAME = "Volkswagen ID.Buzz GTX"
 
 
 def create_charge_callback(
@@ -14,10 +15,12 @@ def create_charge_callback(
     timestamp: str,
     odometer_miles: int,
     notes: str,
+    vehicle_name: str = DEFAULT_VEHICLE_NAME,
 ) -> str:
     """Create a Road Trip fuel-entry callback for a charging session."""
     query = urlencode(
         {
+            "vehicle": vehicle_name,
             "fillAmount": str(energy_kwh),
             "cost": str(total_cost_gbp),
             "date": timestamp,

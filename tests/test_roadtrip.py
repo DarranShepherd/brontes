@@ -17,7 +17,7 @@ class RoadTripCallbackTests(unittest.TestCase):
         self.assertEqual(
             callback,
             "desroadtrip://x-callback-url/addFuel?"
-            "fillAmount=24.8&cost=2.17&date=2026-09-01T06%3A45%3A00Z&"
+            "vehicle=Volkswagen+ID.Buzz+GTX&fillAmount=24.8&cost=2.17&date=2026-09-01T06%3A45%3A00Z&"
             "odometer=18742&notes=Home+%C2%B7+Zappi+%C2%B7+Agile",
         )
 

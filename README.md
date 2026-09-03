@@ -98,6 +98,12 @@ source of truth for observations, intervals, costs, sessions and notification
 delivery state. This makes poll retries and restarts idempotent provided the
 same ledger is retained.
 
+For any persistent deployment, set `BRONTES_DATABASE_PATH` to one **absolute**
+canonical path in every CLI/scheduler wrapper. Do not rely on the process
+working directory: a relative default can create separate ledgers for an
+interactive shell and a scheduler. The current host wrappers use the project
+ledger at `/home/hermes/workspace/projects/brontes/data/brontes.sqlite3`.
+
 ## Configuration and credentials
 
 Brontes uses Python 3.13+ and only the standard library. Credentials are never

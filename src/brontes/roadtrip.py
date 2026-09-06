@@ -26,19 +26,23 @@ def create_charge_callback(
     odometer_miles: int,
     notes: str,
     vehicle_name: str = DEFAULT_VEHICLE_NAME,
+    unit_price_p_per_kwh: Decimal | None = None,
+    filled: bool | None = None,
 ) -> str:
     """Create a Road Trip fuel-entry callback for a charging session."""
-    query = urlencode(
-        {
-            "vehicle": vehicle_name,
-            "fillAmount": str(energy_kwh),
-            "cost": str(total_cost_gbp),
-            "date": _roadtrip_local_timestamp(timestamp),
-            "odometer": str(odometer_miles),
-            "notes": notes,
-        },
-        quote_via=quote,
-    )
+    params: dict[str, str] = {
+        "vehicle": vehicle_name,
+        "fillAmount": str(energy_kwh),
+        "cost": str(total_cost_gbp),
+        "date": _roadtrip_local_timestamp(timestamp),
+        "odometer": str(odometer_miles),
+        "notes": notes,
+    }
+    if unit_price_p_per_kwh is not None:
+        params["unitPrice"] = str(unit_price_p_per_kwh)
+    if filled is not None:
+        params["filled"] = "1" if filled else "0"
+    query = urlencode(params, quote_via=quote)
     return f"desroadtrip://x-callback-url/addFuel?{query}"
 
 

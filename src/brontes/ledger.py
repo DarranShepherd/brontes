@@ -272,6 +272,18 @@ class Ledger:
         return {"connected": bool(row["connected"]), "charging": bool(row["charging"]),
                 "powerKw": row["power_kw"]}
 
+    def _first_vehicle_soc_after_charge(self, charge_ended_at: datetime) -> Decimal | None:
+        row = self._connection.execute(
+            """
+            SELECT soc_percent FROM vehicle_observations
+            WHERE observed_at >= ? AND observed_at <= ?
+            ORDER BY observed_at
+            LIMIT 1
+            """,
+            (_utc_iso(charge_ended_at), _utc_iso(charge_ended_at + timedelta(minutes=15))),
+        ).fetchone()
+        return _decimal(row["soc_percent"]) if row is not None else None
+
     def reconcile_odometer_change(
         self, *, observed_at: datetime, odometer_miles: int
     ) -> list[ChargingSession]:
@@ -289,9 +301,12 @@ class Ledger:
         total_energy = sum((_decimal(row["energy_kwh"]) for row in intervals), Decimal())
         total_cost_pence = sum((self._interval_cost_pence(row) for row in intervals), Decimal())
         total_cost = (total_cost_pence / Decimal("100")).quantize(MONEY, ROUND_HALF_UP)
-        weighted_price = (total_cost_pence / total_energy).quantize(PRICE, ROUND_HALF_UP)
+        weighted_price_exact = total_cost_pence / total_energy
+        weighted_price = weighted_price_exact.quantize(PRICE, ROUND_HALF_UP)
         opened_at = intervals[0]["started_at"]
+        charge_ended_at = intervals[-1]["ended_at"]
         closed_at = _utc_iso(observed_at)
+        ending_soc = self._first_vehicle_soc_after_charge(_parse_utc(charge_ended_at))
         cursor = self._connection.execute(
             """
             INSERT INTO charging_sessions(
@@ -316,7 +331,9 @@ class Ledger:
         callback = create_charge_callback(
             energy_kwh=total_energy,
             total_cost_gbp=total_cost,
-            timestamp=closed_at,
+            unit_price_p_per_kwh=weighted_price_exact,
+            filled=ending_soc is not None and Decimal("79") <= ending_soc <= Decimal("81"),
+            timestamp=charge_ended_at,
             odometer_miles=odometer_miles,
             notes="Home · Zappi · Agile",
         )

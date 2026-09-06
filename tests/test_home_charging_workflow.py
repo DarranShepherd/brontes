@@ -69,6 +69,63 @@ class HomeChargingWorkflowTests(unittest.TestCase):
         )
         self.assertNotIn(pending[0].roadtrip_callback, pending[0].message)
 
+    def test_roadtrip_callback_uses_charge_end_and_marks_90_percent_unfilled(self) -> None:
+        self.ledger.record_home_interval(
+            source_key="zappi-001",
+            started_at=at(1),
+            ended_at=at(1, 30),
+            energy_kwh=Decimal("10.0"),
+        )
+        self.ledger.record_agile_price(
+            settlement_start=at(1), unit_price_p_per_kwh=Decimal("5")
+        )
+        self.ledger.record_vehicle_observation(
+            observed_at=at(1, 31), soc_percent=Decimal("90"), odometer_miles=18742
+        )
+
+        self.ledger.reconcile_odometer_change(observed_at=at(8), odometer_miles=18750)
+
+        callback = self.ledger.pending_notifications()[0].roadtrip_callback
+        self.assertIn("unitPrice=5", callback)
+        self.assertIn("filled=0", callback)
+        self.assertIn("date=2026-09-01%2002%3A30", callback)
+
+    def test_roadtrip_callback_marks_79_to_81_percent_as_filled(self) -> None:
+        self.ledger.record_home_interval(
+            source_key="zappi-001",
+            started_at=at(1),
+            ended_at=at(1, 30),
+            energy_kwh=Decimal("10.0"),
+        )
+        self.ledger.record_agile_price(
+            settlement_start=at(1), unit_price_p_per_kwh=Decimal("5")
+        )
+        self.ledger.record_vehicle_observation(
+            observed_at=at(1, 31), soc_percent=Decimal("80"), odometer_miles=18742
+        )
+
+        self.ledger.reconcile_odometer_change(observed_at=at(8), odometer_miles=18750)
+
+        self.assertIn("filled=1", self.ledger.pending_notifications()[0].roadtrip_callback)
+
+    def test_roadtrip_callback_requires_a_timely_post_charge_soc_for_filled_state(self) -> None:
+        self.ledger.record_home_interval(
+            source_key="zappi-001",
+            started_at=at(1),
+            ended_at=at(1, 30),
+            energy_kwh=Decimal("10.0"),
+        )
+        self.ledger.record_agile_price(
+            settlement_start=at(1), unit_price_p_per_kwh=Decimal("5")
+        )
+        self.ledger.record_vehicle_observation(
+            observed_at=at(2, 30), soc_percent=Decimal("80"), odometer_miles=18742
+        )
+
+        self.ledger.reconcile_odometer_change(observed_at=at(8), odometer_miles=18750)
+
+        self.assertIn("filled=0", self.ledger.pending_notifications()[0].roadtrip_callback)
+
     def test_repeated_zappi_interval_source_key_does_not_double_count(self) -> None:
         self.ledger.record_home_interval(
             source_key="zappi-001",

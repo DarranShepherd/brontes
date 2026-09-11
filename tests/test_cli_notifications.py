@@ -21,6 +21,10 @@ class HermesCliNotificationDispatcherTests(unittest.TestCase):
                     settlement_start=datetime(2026, 9, 1, tzinfo=timezone.utc),
                     unit_price_p_per_kwh=Decimal("10"),
                 )
+                ledger.record_vehicle_observation(
+                    observed_at=datetime(2026, 9, 1, 0, 31, tzinfo=timezone.utc),
+                    soc_percent=Decimal("80"), odometer_miles=19044,
+                )
                 ledger.reconcile_odometer_change(
                     observed_at=datetime(2026, 9, 1, 1, tzinfo=timezone.utc), odometer_miles=19044
                 )

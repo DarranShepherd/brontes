@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from wsgiref.util import setup_testing_defaults
 
@@ -58,6 +59,12 @@ class LocalApiTests(unittest.TestCase):
             {"settlementStart": "2026-09-01T01:00:00Z", "unitPricePPerKwh": "5"},
         )
         self.assertEqual(status, "201 Created")
+
+        self.ledger.record_vehicle_observation(
+            observed_at=datetime(2026, 9, 1, 1, 31, tzinfo=UTC),
+            soc_percent=Decimal("80"),
+            odometer_miles=18750,
+        )
 
         status, reconciliation = self.request(
             "POST",

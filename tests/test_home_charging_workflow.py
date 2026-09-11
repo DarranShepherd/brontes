@@ -44,6 +44,9 @@ class HomeChargingWorkflowTests(unittest.TestCase):
         self.ledger.record_agile_price(
             settlement_start=at(2), unit_price_p_per_kwh=Decimal("11.2837838")
         )
+        self.ledger.record_vehicle_observation(
+            observed_at=at(2, 31), soc_percent=Decimal("80"), odometer_miles=18750
+        )
 
         sessions = self.ledger.reconcile_odometer_change(
             observed_at=at(8), odometer_miles=18750
@@ -86,7 +89,7 @@ class HomeChargingWorkflowTests(unittest.TestCase):
         self.ledger.reconcile_odometer_change(observed_at=at(8), odometer_miles=18750)
 
         callback = self.ledger.pending_notifications()[0].roadtrip_callback
-        self.assertIn("unitPrice=5", callback)
+        self.assertIn("unitPrice=0.05", callback)
         self.assertIn("filled=0", callback)
         self.assertIn("date=2026-09-01%2002%3A30", callback)
 
@@ -122,9 +125,10 @@ class HomeChargingWorkflowTests(unittest.TestCase):
             observed_at=at(2, 30), soc_percent=Decimal("80"), odometer_miles=18742
         )
 
-        self.ledger.reconcile_odometer_change(observed_at=at(8), odometer_miles=18750)
+        with self.assertRaisesRegex(ValueError, "missing timely post-charge"):
+            self.ledger.reconcile_odometer_change(observed_at=at(8), odometer_miles=18750)
 
-        self.assertIn("filled=0", self.ledger.pending_notifications()[0].roadtrip_callback)
+        self.assertEqual(self.ledger.pending_notification_count(), 0)
 
     def test_repeated_zappi_interval_source_key_does_not_double_count(self) -> None:
         self.ledger.record_home_interval(
@@ -141,6 +145,9 @@ class HomeChargingWorkflowTests(unittest.TestCase):
         )
         self.ledger.record_agile_price(
             settlement_start=at(1), unit_price_p_per_kwh=Decimal("5")
+        )
+        self.ledger.record_vehicle_observation(
+            observed_at=at(1, 31), soc_percent=Decimal("80"), odometer_miles=18750
         )
 
         sessions = self.ledger.reconcile_odometer_change(

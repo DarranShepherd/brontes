@@ -272,17 +272,21 @@ class Ledger:
         return {"connected": bool(row["connected"]), "charging": bool(row["charging"]),
                 "powerKw": row["power_kw"]}
 
-    def _first_vehicle_soc_after_charge(self, charge_ended_at: datetime) -> Decimal | None:
+    def _first_vehicle_observation_after_charge(
+        self, charge_ended_at: datetime
+    ) -> tuple[Decimal, int] | None:
         row = self._connection.execute(
             """
-            SELECT soc_percent FROM vehicle_observations
+            SELECT soc_percent, odometer_miles FROM vehicle_observations
             WHERE observed_at >= ? AND observed_at <= ?
             ORDER BY observed_at
             LIMIT 1
             """,
             (_utc_iso(charge_ended_at), _utc_iso(charge_ended_at + timedelta(minutes=15))),
         ).fetchone()
-        return _decimal(row["soc_percent"]) if row is not None else None
+        if row is None:
+            return None
+        return _decimal(row["soc_percent"]), int(row["odometer_miles"])
 
     def reconcile_odometer_change(
         self, *, observed_at: datetime, odometer_miles: int
@@ -306,7 +310,12 @@ class Ledger:
         opened_at = intervals[0]["started_at"]
         charge_ended_at = intervals[-1]["ended_at"]
         closed_at = _utc_iso(observed_at)
-        ending_soc = self._first_vehicle_soc_after_charge(_parse_utc(charge_ended_at))
+        ending_vehicle = self._first_vehicle_observation_after_charge(
+            _parse_utc(charge_ended_at)
+        )
+        if ending_vehicle is None:
+            raise ValueError("missing timely post-charge vehicle observation")
+        ending_soc, ending_odometer_miles = ending_vehicle
         cursor = self._connection.execute(
             """
             INSERT INTO charging_sessions(
@@ -317,7 +326,7 @@ class Ledger:
             (
                 opened_at,
                 closed_at,
-                odometer_miles,
+                ending_odometer_miles,
                 str(total_energy),
                 str(total_cost),
                 str(weighted_price),
@@ -331,10 +340,10 @@ class Ledger:
         callback = create_charge_callback(
             energy_kwh=total_energy,
             total_cost_gbp=total_cost,
-            unit_price_p_per_kwh=weighted_price_exact,
-            filled=ending_soc is not None and Decimal("79") <= ending_soc <= Decimal("81"),
+            unit_price_p_per_kwh=weighted_price_exact / Decimal("100"),
+            filled=Decimal("79") <= ending_soc <= Decimal("81"),
             timestamp=charge_ended_at,
-            odometer_miles=odometer_miles,
+            odometer_miles=ending_odometer_miles,
             notes="Home · Zappi · Agile",
         )
         handoff_url = create_handoff_url(
@@ -345,7 +354,7 @@ class Ledger:
             "Buzz charge complete\n\n"
             f"{total_energy} kWh\n£{total_cost} total\n"
             f"{weighted_price}p/kWh\n\n"
-            f"Odometer: {odometer_miles:,} miles\nHome · Zappi · Agile\n\n"
+            f"Odometer: {ending_odometer_miles:,} miles\nHome · Zappi · Agile\n\n"
             f'<a href="{handoff_url}">Add to Road Trip</a>'
         )
         self._connection.execute(

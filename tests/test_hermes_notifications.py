@@ -53,6 +53,10 @@ class HermesNotificationDispatcherTests(unittest.TestCase):
             settlement_start=datetime(2026, 9, 1, 1, tzinfo=UTC),
             unit_price_p_per_kwh=Decimal("5"),
         )
+        self.ledger.record_vehicle_observation(
+            observed_at=datetime(2026, 9, 1, 1, 31, tzinfo=UTC),
+            soc_percent=Decimal("80"), odometer_miles=18750,
+        )
         self.ledger.reconcile_odometer_change(
             observed_at=datetime(2026, 9, 1, 8, tzinfo=UTC), odometer_miles=18750
         )

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from brontes.ledger import Ledger
 from brontes.myenergi import ZappiTelemetry
+from brontes.vw import VehicleTelemetry
 from brontes.workflow import HomeChargingWorkflow
 
 UTC = timezone.utc
@@ -63,10 +64,25 @@ class HomeSessionWorkflowTests(unittest.TestCase):
                     datetime(2026, 9, 1, 3, 30, tzinfo=UTC),
                 )
 
+                self.assertEqual(completed, [])
+                self.assertEqual(ledger.pending_notification_count(), 0)
+
+                completed = workflow.process_vehicle(
+                    VehicleTelemetry(
+                        source_timestamp=datetime(2026, 9, 1, 2, 31, tzinfo=UTC),
+                        soc_percent=Decimal("80"),
+                        odometer_miles=19050,
+                        charging_state=None,
+                        charge_type=None,
+                        charge_power_kw=None,
+                    )
+                )
+
                 self.assertEqual(len(completed), 1)
-                self.assertEqual(completed[0].energy_kwh, Decimal("4"))
-                self.assertEqual(completed[0].total_cost_gbp, Decimal("0.40"))
                 self.assertEqual(ledger.pending_notification_count(), 1)
+                callback = ledger.pending_notifications()[0].roadtrip_callback
+                self.assertIn("odometer=19050", callback)
+                self.assertIn("filled=1", callback)
             finally:
                 ledger.close()
 
@@ -88,9 +104,15 @@ class HomeSessionWorkflowTests(unittest.TestCase):
                 )
 
                 rates.available = True
-                completed = workflow.process_zappi(
-                    _zappi(connected=False, charging=False, energy="2"),
-                    datetime(2026, 9, 1, 1, 2, tzinfo=UTC),
+                completed = workflow.process_vehicle(
+                    VehicleTelemetry(
+                        source_timestamp=datetime(2026, 9, 1, 0, 31, tzinfo=UTC),
+                        soc_percent=Decimal("80"),
+                        odometer_miles=19044,
+                        charging_state=None,
+                        charge_type=None,
+                        charge_power_kw=None,
+                    )
                 )
 
                 self.assertEqual(len(completed), 1)

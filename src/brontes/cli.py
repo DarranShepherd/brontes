@@ -31,12 +31,22 @@ def execute_poll(
     vehicle_reader: Callable[[], VehicleTelemetry],
     dispatcher: NotificationDispatcher,
     observed_at: datetime,
+    on_vw_poll_failure: Callable[[datetime], object] | None = None,
+    on_vw_poll_success: Callable[[datetime], object] | None = None,
 ) -> dict[str, object]:
     """Run one provider poll, then deliver any persisted notifications."""
     if provider == "zappi":
         sessions = workflow.process_zappi(zappi_reader(), observed_at)
     elif provider == "vw":
-        sessions = workflow.process_vehicle(vehicle_reader())
+        try:
+            sessions = workflow.process_vehicle(vehicle_reader())
+        except Exception:
+            if on_vw_poll_failure is not None:
+                on_vw_poll_failure(observed_at)
+            dispatcher.deliver_pending()
+            raise
+        if on_vw_poll_success is not None:
+            on_vw_poll_success(observed_at)
     else:
         raise ValueError(f"unsupported provider: {provider}")
     return {
@@ -156,6 +166,12 @@ def main(argv: list[str] | None = None) -> int:
                 vehicle_reader=_vehicle_reader,
                 dispatcher=_dispatcher(ledger),
                 observed_at=datetime.now(timezone.utc),
+                on_vw_poll_failure=lambda observed_at: ledger.record_vw_poll_failure(
+                    observed_at=observed_at
+                ),
+                on_vw_poll_success=lambda observed_at: ledger.record_vw_poll_success(
+                    observed_at=observed_at
+                ),
             )
         elif args.command == "reconcile":
             result = execute_reconcile(workflow=_workflow(ledger), dispatcher=_dispatcher(ledger))

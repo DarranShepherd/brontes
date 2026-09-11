@@ -38,6 +38,24 @@ class HermesCliNotificationDispatcherTests(unittest.TestCase):
                 self.assertEqual(commands[0][:4], ["hermes", "send", "--to", "telegram"])
             finally:
                 ledger.close()
+    def test_delivers_vw_poll_alert(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Ledger(Path(directory) / "brontes.sqlite3")
+            try:
+                started = datetime(2026, 9, 1, tzinfo=timezone.utc)
+                ledger.record_vw_poll_failure(observed_at=started)
+                ledger.record_vw_poll_failure(observed_at=started.replace(hour=1))
+                ledger.record_vw_poll_failure(observed_at=started.replace(hour=2))
+                commands = []
+                dispatcher = HermesCliNotificationDispatcher(
+                    ledger, run=lambda command: commands.append(command) or '{"success":true}'
+                )
+
+                self.assertEqual(dispatcher.deliver_pending(), 1)
+                self.assertEqual(ledger.pending_alerts(), [])
+                self.assertIn("failed 3 consecutive times", commands[0][-1])
+            finally:
+                ledger.close()
 
 
 if __name__ == "__main__":

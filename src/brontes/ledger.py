@@ -39,6 +39,12 @@ class PendingNotification:
 
 
 @dataclass(frozen=True)
+class PendingAlert:
+    id: int
+    message: str
+
+
+@dataclass(frozen=True)
 class ZappiObservation:
     observed_at: datetime
     device_id: str
@@ -138,6 +144,18 @@ class Ledger:
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 requested_at TEXT NOT NULL,
                 odometer_miles INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS alerts (
+                id INTEGER PRIMARY KEY,
+                message TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending',
+                delivered_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS vw_poll_health (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                failure_alert_active INTEGER NOT NULL DEFAULT 0,
+                last_failure_alert_at TEXT
             );
             """
         )
@@ -424,6 +442,72 @@ class Ledger:
             "SELECT COUNT(*) AS count FROM notifications WHERE state = 'pending'"
         ).fetchone()
         return int(row["count"])
+
+    def record_vw_poll_failure(self, *, observed_at: datetime) -> bool:
+        row = self._connection.execute(
+            """SELECT consecutive_failures, last_failure_alert_at
+            FROM vw_poll_health WHERE id = 1"""
+        ).fetchone()
+        failures = (int(row["consecutive_failures"]) if row is not None else 0) + 1
+        last_alert_at = _parse_utc(row["last_failure_alert_at"]) if row and row["last_failure_alert_at"] else None
+        should_alert = failures >= 3 and (
+            last_alert_at is None or observed_at - last_alert_at >= timedelta(hours=24)
+        )
+        if should_alert:
+            self._connection.execute(
+                "INSERT INTO alerts(message) VALUES (?)",
+                (f"VW telemetry polling has failed {failures} consecutive times. Check CarConnectivity authentication.",),
+            )
+        previous_alert_at = row["last_failure_alert_at"] if row is not None else None
+        self._connection.execute(
+            """INSERT INTO vw_poll_health(
+                id, consecutive_failures, failure_alert_active, last_failure_alert_at
+            ) VALUES (1, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                consecutive_failures = excluded.consecutive_failures,
+                failure_alert_active = excluded.failure_alert_active,
+                last_failure_alert_at = excluded.last_failure_alert_at""",
+            (failures, int(failures >= 3), _utc_iso(observed_at) if should_alert else previous_alert_at),
+        )
+        self._connection.commit()
+        return should_alert
+
+    def record_vw_poll_success(self, *, observed_at: datetime) -> bool:
+        row = self._connection.execute(
+            "SELECT consecutive_failures, failure_alert_active FROM vw_poll_health WHERE id = 1"
+        ).fetchone()
+        failures = int(row["consecutive_failures"]) if row is not None else 0
+        had_alert = row is not None and bool(row["failure_alert_active"])
+        if had_alert:
+            self._connection.execute(
+                "INSERT INTO alerts(message) VALUES (?)",
+                (f"VW telemetry polling recovered after {failures} consecutive failures.",),
+            )
+        self._connection.execute(
+            """INSERT INTO vw_poll_health(
+                id, consecutive_failures, failure_alert_active, last_failure_alert_at
+            ) VALUES (1, 0, 0, NULL)
+            ON CONFLICT(id) DO UPDATE SET
+                consecutive_failures = 0,
+                failure_alert_active = 0,
+                last_failure_alert_at = NULL"""
+        )
+        self._connection.commit()
+        return had_alert
+
+    def pending_alerts(self) -> list[PendingAlert]:
+        rows = self._connection.execute(
+            "SELECT id, message FROM alerts WHERE state = 'pending' ORDER BY id"
+        ).fetchall()
+        return [PendingAlert(id=row["id"], message=row["message"]) for row in rows]
+
+    def mark_alert_delivered(self, alert_id: int, *, delivered_at: datetime) -> None:
+        self._connection.execute(
+            """UPDATE alerts SET state = 'delivered', delivered_at = ?
+            WHERE id = ? AND state = 'pending'""",
+            (_utc_iso(delivered_at), alert_id),
+        )
+        self._connection.commit()
 
     def mark_notification_delivered(self, notification_id: int, *, delivered_at: datetime) -> None:
         self._connection.execute(

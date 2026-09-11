@@ -63,6 +63,26 @@ class CliCommandTests(unittest.TestCase):
         self.assertEqual(workflow.events, [("reconcile",)])
         self.assertEqual(dispatcher.calls, 1)
 
+    def test_vw_poll_records_failure_and_delivers_alerts(self) -> None:
+        workflow = _Workflow()
+        dispatcher = _Dispatcher()
+        failures = []
+        when = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
+
+        with self.assertRaisesRegex(RuntimeError, "VW unavailable"):
+            execute_poll(
+                "vw",
+                workflow=workflow,
+                zappi_reader=lambda: self.fail("unexpected Zappi read"),
+                vehicle_reader=lambda: (_ for _ in ()).throw(RuntimeError("VW unavailable")),
+                dispatcher=dispatcher,
+                observed_at=when,
+                on_vw_poll_failure=failures.append,
+            )
+
+        self.assertEqual(failures, [when])
+        self.assertEqual(dispatcher.calls, 1)
+
     def test_vw_poll_processes_vehicle_without_using_local_clock(self) -> None:
         workflow = _Workflow()
         dispatcher = _Dispatcher()

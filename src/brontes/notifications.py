@@ -48,6 +48,28 @@ class HermesNotificationDispatcher:
                 notification.id, delivered_at=datetime.now(timezone.utc)
             )
             delivered += 1
+        for alert in self._ledger.pending_alerts():
+            payload = json.dumps(
+                {
+                    "event_type": "brontes.vw_poll_health",
+                    "target_profile": self._target_profile,
+                    "text": alert.message,
+                }
+            ).encode("utf-8")
+            request = Request(
+                self._notification_url,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urlopen(request, timeout=10) as response:
+                    if not 200 <= response.status < 300:
+                        continue
+            except (HTTPError, URLError, TimeoutError):
+                continue
+            self._ledger.mark_alert_delivered(alert.id, delivered_at=datetime.now(timezone.utc))
+            delivered += 1
         return delivered
 
 
@@ -79,6 +101,17 @@ class HermesCliNotificationDispatcher:
             self._ledger.mark_notification_delivered(
                 notification.id, delivered_at=datetime.now(timezone.utc)
             )
+            delivered += 1
+        for alert in self._ledger.pending_alerts():
+            try:
+                result = json.loads(
+                    self._run(["hermes", "send", "--to", self._target, "--json", alert.message])
+                )
+            except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+                continue
+            if not isinstance(result, dict) or result.get("success") is not True:
+                continue
+            self._ledger.mark_alert_delivered(alert.id, delivered_at=datetime.now(timezone.utc))
             delivered += 1
         return delivered
 

@@ -2,7 +2,7 @@ import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from brontes.cli import execute_poll, execute_reconcile
+from brontes.cli import execute_poll, execute_reconcile, execute_reconcile_away
 from brontes.myenergi import ZappiTelemetry
 from brontes.vw import VehicleTelemetry
 
@@ -22,6 +22,10 @@ class _Workflow:
     def reconcile_pending(self):
         self.events.append(("reconcile",))
         return ["session"]
+
+    def reconcile_away(self):
+        self.events.append(("reconcile-away",))
+        return ["session", "session"]
 
 
 class _Dispatcher:
@@ -61,6 +65,16 @@ class CliCommandTests(unittest.TestCase):
 
         self.assertEqual(result, {"sessionsFinalised": 1, "notificationsDelivered": 2})
         self.assertEqual(workflow.events, [("reconcile",)])
+        self.assertEqual(dispatcher.calls, 1)
+
+    def test_reconcile_away_backfills_candidates_and_delivers_notifications(self) -> None:
+        workflow = _Workflow()
+        dispatcher = _Dispatcher()
+
+        result = execute_reconcile_away(workflow=workflow, dispatcher=dispatcher)
+
+        self.assertEqual(result, {"sessionsFinalised": 2, "notificationsDelivered": 2})
+        self.assertEqual(workflow.events, [("reconcile-away",)])
         self.assertEqual(dispatcher.calls, 1)
 
     def test_vw_poll_records_failure_and_delivers_alerts(self) -> None:

@@ -67,6 +67,17 @@ def execute_reconcile(
     }
 
 
+def execute_reconcile_away(
+    *, workflow: HomeChargingWorkflow, dispatcher: NotificationDispatcher
+) -> dict[str, object]:
+    """Backfill telemetry-derived away sessions and deliver their notifications."""
+    sessions = workflow.reconcile_away()
+    return {
+        "sessionsFinalised": len(sessions),
+        "notificationsDelivered": dispatcher.deliver_pending(),
+    }
+
+
 def _database_path() -> Path:
     return Path(os.environ.get("BRONTES_DATABASE_PATH", "data/brontes.sqlite3"))
 
@@ -145,6 +156,7 @@ def _parser() -> argparse.ArgumentParser:
     poll = commands.add_parser("poll", help="poll one read-only provider")
     poll.add_argument("provider", choices=("zappi", "vw"))
     commands.add_parser("reconcile", help="retry pending session finalisation and delivery")
+    commands.add_parser("reconcile-away", help="backfill away sessions from persisted VW telemetry")
     commands.add_parser("status", help="print persisted local status")
     commands.add_parser("serve", help="run the optional loopback HTTP API")
     return parser
@@ -175,6 +187,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "reconcile":
             result = execute_reconcile(workflow=_workflow(ledger), dispatcher=_dispatcher(ledger))
+        elif args.command == "reconcile-away":
+            result = execute_reconcile_away(workflow=_workflow(ledger), dispatcher=_dispatcher(ledger))
         else:
             result = _status(ledger)
         print(json.dumps(result, separators=(",", ":"), default=str))

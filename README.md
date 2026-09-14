@@ -189,8 +189,15 @@ charge reports, away charging, or MyEnergi schedule operations.
 - Counter deltas are allocated proportionally across their observation window
   when calculating half-hour Agile costs. The calculation is therefore bounded
   by the 2-minute Zappi polling cadence rather than exact sub-minute metering.
-- The initial scope is home charging only. Away AC/DC detection, manual
-  reconciliation, single-charge protection and control paths are not yet
+- Away charging is conservatively inferred only from a VW SoC rise of at least
+  5 percentage points while no home-Zappi connection is recorded. Energy is an
+  estimate from the Buzz GTX's 86 kWh battery; entries explicitly retain that
+  provenance. A rise of at least 20 points within an hour is classified as DC;
+  other qualifying rises are AC. AC uses the current UK Ofgem national-average
+  Direct Debit cap rate (26.11p/kWh for 1 July–30 September 2026); DC uses the
+  configured £0.75/kWh assumption. The `reconcile-away` workflow is idempotent
+  and is intended for controlled historical backfills.
+- Manual reconciliation, single-charge protection and control paths are not yet
   implemented.
 - The local API binds to loopback by default. Do not expose it publicly or
   commit credentials, token/cache files or SQLite ledger data.

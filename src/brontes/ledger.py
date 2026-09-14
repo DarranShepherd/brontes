@@ -157,6 +157,10 @@ class Ledger:
                 failure_alert_active INTEGER NOT NULL DEFAULT 0,
                 last_failure_alert_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS away_charge_candidates (
+                source_key TEXT PRIMARY KEY,
+                session_id INTEGER NOT NULL UNIQUE REFERENCES charging_sessions(id)
+            );
             """
         )
         self._connection.commit()
@@ -259,6 +263,113 @@ class Ledger:
             "SELECT odometer_miles FROM vehicle_observations ORDER BY observed_at DESC LIMIT 1"
         ).fetchone()
         return int(row["odometer_miles"]) if row is not None else None
+
+    def latest_vehicle_observation_before(
+        self, observed_at: datetime
+    ) -> tuple[datetime, Decimal, int] | None:
+        row = self._connection.execute(
+            """SELECT observed_at, soc_percent, odometer_miles FROM vehicle_observations
+            WHERE observed_at < ? ORDER BY observed_at DESC LIMIT 1""",
+            (_utc_iso(observed_at),),
+        ).fetchone()
+        if row is None:
+            return None
+        return (
+            _parse_utc(row["observed_at"]),
+            _decimal(row["soc_percent"]),
+            int(row["odometer_miles"]),
+        )
+
+    def vehicle_observations(self) -> list[tuple[datetime, Decimal, int]]:
+        rows = self._connection.execute(
+            """SELECT observed_at, soc_percent, odometer_miles FROM vehicle_observations
+            ORDER BY observed_at"""
+        ).fetchall()
+        return [
+            (_parse_utc(row["observed_at"]), _decimal(row["soc_percent"]), int(row["odometer_miles"]))
+            for row in rows
+        ]
+
+    def home_was_connected_between(self, start: datetime, end: datetime) -> bool:
+        row = self._connection.execute(
+            """SELECT 1 FROM zappi_observations
+            WHERE connected = 1 AND observed_at >= ? AND observed_at <= ? LIMIT 1""",
+            (_utc_iso(start), _utc_iso(end)),
+        ).fetchone()
+        return row is not None
+
+    def record_away_charge(
+        self,
+        *,
+        source_key: str,
+        opened_at: datetime,
+        closed_at: datetime,
+        odometer_miles: int,
+        energy_kwh: Decimal,
+        unit_price_p_per_kwh: Decimal,
+        charge_type: str,
+        starting_soc_percent: Decimal,
+        ending_soc_percent: Decimal,
+    ) -> ChargingSession | None:
+        """Persist one telemetry-derived away charge and its notification once."""
+        if self._connection.execute(
+            "SELECT 1 FROM away_charge_candidates WHERE source_key = ?", (source_key,)
+        ).fetchone() is not None:
+            return None
+        total_cost = (energy_kwh * unit_price_p_per_kwh / Decimal("100")).quantize(
+            MONEY, ROUND_HALF_UP
+        )
+        cursor = self._connection.execute(
+            """INSERT INTO charging_sessions(
+                opened_at, closed_at, odometer_miles, location_type, total_energy_kwh,
+                total_cost_gbp, weighted_unit_price_p_per_kwh, energy_source, cost_source
+            ) VALUES (?, ?, ?, 'away', ?, ?, ?, 'vw_soc_estimated', 'assumed_unit_price')""",
+            (
+                _utc_iso(opened_at), _utc_iso(closed_at), odometer_miles, str(energy_kwh),
+                str(total_cost), str(unit_price_p_per_kwh),
+            ),
+        )
+        session_id = int(cursor.lastrowid)
+        self._connection.execute(
+            "INSERT INTO away_charge_candidates(source_key, session_id) VALUES (?, ?)",
+            (source_key, session_id),
+        )
+        notes = f"Away · {charge_type} · estimated from VW SoC"
+        callback = create_charge_callback(
+            energy_kwh=energy_kwh,
+            total_cost_gbp=total_cost,
+            unit_price_p_per_kwh=unit_price_p_per_kwh / Decimal("100"),
+            filled=False,
+            timestamp=_utc_iso(closed_at),
+            odometer_miles=odometer_miles,
+            notes=notes,
+        )
+        handoff_url = create_handoff_url(
+            callback, handoff_page_url=self._roadtrip_handoff_page_url
+        )
+        message = (
+            "Buzz away charge detected\n\n"
+            f"{energy_kwh} kWh estimated\n£{total_cost} estimated\n"
+            f"{unit_price_p_per_kwh:.2f}p/kWh assumed\n\n"
+            f"VW SoC: {starting_soc_percent:.0f}% → {ending_soc_percent:.0f}%\n"
+            f"Odometer: {odometer_miles:,} miles\n{notes}\n\n"
+            f'<a href="{handoff_url}">Add to Road Trip</a>'
+        )
+        self._connection.execute(
+            """INSERT INTO notifications(session_id, message, roadtrip_callback)
+            VALUES (?, ?, ?)""",
+            (session_id, message, callback),
+        )
+        self._connection.commit()
+        return ChargingSession(
+            id=session_id,
+            energy_kwh=energy_kwh,
+            total_cost_gbp=total_cost,
+            weighted_unit_price_p_per_kwh=unit_price_p_per_kwh,
+            location_type="away",
+            energy_source="vw_soc_estimated",
+            cost_source="assumed_unit_price",
+        )
 
     def request_home_session_closure(self, *, requested_at: datetime, odometer_miles: int) -> None:
         self._connection.execute(

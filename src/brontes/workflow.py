@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Protocol
 
@@ -45,6 +45,7 @@ class HomeChargingWorkflow:
 
     def process_vehicle(self, telemetry: VehicleTelemetry) -> list[ChargingSession]:
         previous_odometer = self._ledger.latest_vehicle_odometer()
+        previous = self._ledger.latest_vehicle_observation_before(telemetry.source_timestamp)
         self._ledger.record_vehicle_observation(
             observed_at=telemetry.source_timestamp,
             soc_percent=telemetry.soc_percent,
@@ -55,11 +56,72 @@ class HomeChargingWorkflow:
                 requested_at=telemetry.source_timestamp,
                 odometer_miles=telemetry.odometer_miles,
             )
-        return self._finalize_requested_session()
+        completed = self._finalize_requested_session()
+        away_charge = self._detect_away_charge(previous, telemetry)
+        return completed + ([away_charge] if away_charge is not None else [])
+
+    def _detect_away_charge(
+        self,
+        previous: tuple[datetime, Decimal, int] | None,
+        telemetry: VehicleTelemetry,
+    ) -> ChargingSession | None:
+        """Conservatively derive an away session from a substantial VW SoC rise."""
+        if previous is None:
+            return None
+        previous_at, previous_soc, _ = previous
+        soc_rise = telemetry.soc_percent - previous_soc
+        if soc_rise < Decimal("5"):
+            return None
+        if self._ledger.home_was_connected_between(previous_at, telemetry.source_timestamp):
+            return None
+        elapsed = telemetry.source_timestamp - previous_at
+        charge_type = (
+            "DC"
+            if soc_rise >= Decimal("20") and elapsed <= timedelta(hours=1)
+            else "AC"
+        )
+        unit_price = Decimal("75.00") if charge_type == "DC" else Decimal("26.11")
+        energy = (soc_rise * Decimal("86") / Decimal("100")).quantize(Decimal("0.01"))
+        return self._ledger.record_away_charge(
+            source_key=(
+                f"vw-away:{previous_at.isoformat()}:{telemetry.source_timestamp.isoformat()}"
+            ),
+            opened_at=previous_at,
+            closed_at=telemetry.source_timestamp,
+            odometer_miles=telemetry.odometer_miles,
+            energy_kwh=energy,
+            unit_price_p_per_kwh=unit_price,
+            charge_type=charge_type,
+            starting_soc_percent=previous_soc,
+            ending_soc_percent=telemetry.soc_percent,
+        )
 
     def reconcile_pending(self) -> list[ChargingSession]:
         """Retry a previously requested closure after a transient dependency failure."""
         return self._finalize_requested_session()
+
+    def reconcile_away(self, *, start_at: datetime | None = None) -> list[ChargingSession]:
+        """Backfill unrecorded away sessions from persisted telemetry history."""
+        completed: list[ChargingSession] = []
+        observations = self._ledger.vehicle_observations()
+        for previous, current in zip(observations, observations[1:]):
+            current_at, current_soc, current_odometer = current
+            if start_at is not None and current_at < start_at:
+                continue
+            session = self._detect_away_charge(
+                previous,
+                VehicleTelemetry(
+                    source_timestamp=current_at,
+                    soc_percent=current_soc,
+                    odometer_miles=current_odometer,
+                    charging_state=None,
+                    charge_type=None,
+                    charge_power_kw=None,
+                ),
+            )
+            if session is not None:
+                completed.append(session)
+        return completed
 
     def _record_energy_delta(
         self,

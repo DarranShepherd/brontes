@@ -18,6 +18,8 @@ class AgileRates(Protocol):
 class HomeChargingWorkflow:
     """Aggregate Zappi intervals until an explicit home-session boundary."""
 
+    _ZAPPI_CONFIRMATION_WINDOW = timedelta(minutes=5)
+
     def __init__(self, ledger: Ledger, rates: AgileRates) -> None:
         self._ledger = ledger
         self._rates = rates
@@ -72,7 +74,9 @@ class HomeChargingWorkflow:
         soc_rise = telemetry.soc_percent - previous_soc
         if soc_rise < Decimal("5"):
             return None
-        if self._ledger.home_was_connected_between(previous_at, telemetry.source_timestamp):
+        if self._ledger.home_was_connected_between(
+            previous_at, telemetry.source_timestamp + self._ZAPPI_CONFIRMATION_WINDOW
+        ):
             return None
         elapsed = telemetry.source_timestamp - previous_at
         charge_type = (

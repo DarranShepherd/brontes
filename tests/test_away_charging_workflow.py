@@ -100,6 +100,31 @@ class AwayChargingWorkflowTests(unittest.TestCase):
             finally:
                 ledger.close()
 
+    def test_does_not_create_away_session_when_zappi_starts_charging_just_after_vw_snapshot(self) -> None:
+        """VW's source timestamp can precede the Zappi poll that confirms home charging."""
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Ledger(Path(directory) / "brontes.sqlite3")
+            try:
+                workflow = HomeChargingWorkflow(ledger, _Rates())
+                previous = datetime(2026, 9, 14, 21, 49, 26, tzinfo=UTC)
+                vw_snapshot = datetime(2026, 9, 15, 10, 42, 38, tzinfo=UTC)
+                workflow.process_vehicle(_vehicle(previous, "6", 19433))
+                ledger.record_zappi_observation(
+                    observed_at=datetime(2026, 9, 15, 10, 45, 45, tzinfo=UTC),
+                    device_id="22307745",
+                    connected=True,
+                    charging=True,
+                    power_kw=Decimal("11.334"),
+                    session_energy_kwh=Decimal("0.58"),
+                )
+
+                self.assertEqual(
+                    workflow.process_vehicle(_vehicle(vw_snapshot, "26", 19433)), []
+                )
+                self.assertEqual(ledger.pending_notification_count(), 0)
+            finally:
+                ledger.close()
+
     def test_does_not_create_away_session_for_a_small_soc_change_or_home_connection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             ledger = Ledger(Path(directory) / "brontes.sqlite3")

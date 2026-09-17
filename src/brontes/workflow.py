@@ -75,7 +75,8 @@ class HomeChargingWorkflow:
         if soc_rise < Decimal("5"):
             return None
         if self._ledger.home_was_connected_between(
-            previous_at, telemetry.source_timestamp + self._ZAPPI_CONFIRMATION_WINDOW
+            previous_at - self._ZAPPI_CONFIRMATION_WINDOW,
+            telemetry.source_timestamp + self._ZAPPI_CONFIRMATION_WINDOW,
         ):
             return None
         elapsed = telemetry.source_timestamp - previous_at

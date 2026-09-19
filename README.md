@@ -33,28 +33,51 @@ MyEnergi:
 The service does not currently control Volkswagen, Zappi, MyEnergi schedules,
 or Telegram directly. It does not use an LLM in its decision path.
 
-## Home-session lifecycle
+## Charging-session lifecycles
 
-```text
-Zappi poll every 2 minutes
-  -> persist connected/charging/power/meter counter observation
-  -> persist positive counter delta as a home interval
-  -> retrieve and persist matching Agile settlement prices
+### Home charging
 
-Budget Charge pause/resume
-  -> retain all intervals in the same unassigned logical session
-
-Zappi unplugged OR later VW odometer increase
-  -> aggregate all unassigned home intervals
-  -> calculate cost from recorded Agile prices
-  -> persist charging session and pending notification
-  -> send Telegram Road Trip handoff
+```mermaid
+flowchart TD
+    A[Zappi poll every 2 minutes] --> B[Persist connection, power and meter observation]
+    B --> C[Persist positive meter-counter delta as a home interval]
+    C --> D[Persist matching Agile settlement prices]
+    D --> E{Unplugged or later VW odometer increase?}
+    E -- No --> A
+    E -- Yes --> F[Aggregate unassigned intervals and calculate cost]
+    F --> G[Persist home session and durable pending notification]
+    G --> H[Send Telegram Road Trip handoff]
 ```
 
-A stopped charge or an SoC of 80% is deliberately **not** a completion trigger.
-A Budget Charge session may resume after a price gap, and the configured vehicle
-limit may be above 80%. If Octopus pricing is unavailable, finalisation remains
-pending and subsequent polls retry it; no unpriced session is silently sent.
+Budget Charge pauses and resumes retain intervals in the same unassigned logical
+home session. A stopped charge or an SoC of 80% is deliberately **not** a
+completion trigger: a Budget Charge session may resume after a price gap and the
+configured vehicle limit may be above 80%. If Octopus pricing is unavailable,
+finalisation remains pending and subsequent polls retry it; no unpriced session
+is silently sent.
+
+### Away charging
+
+```mermaid
+flowchart TD
+    A[VW telemetry poll] --> B[Persist raw SoC and odometer observation]
+    B --> C{Stationary SoC regressed?}
+    C -- Yes --> D[Retain for audit; ignore for charging inference]
+    C -- No --> E{Cumulative stationary SoC rise at least 5% and no recent Zappi connection?}
+    E -- No --> F[Update trusted baseline]
+    E -- Yes --> G[Open or update one provisional away session]
+    G --> H{Vehicle moves or SoC plateaus for 1 hour?}
+    H -- No --> A
+    H -- Yes --> I[Finalise one estimated AC/DC session]
+    I --> J[Persist one notification and Road Trip handoff]
+```
+
+Away inference rejects stationary regressive readings — which VW can return
+intermittently — so a stale SoC cannot become the baseline for a phantom charge.
+A qualifying rise opens a provisional session only after two increasing VW SoC
+observations; later increases update it rather than generating more
+notifications. The session finalises only after a credible boundary: vehicle
+movement or a one-hour plateau in SoC.
 
 ## Polling and persistence
 
@@ -189,16 +212,19 @@ charge reports, away charging, or MyEnergi schedule operations.
 - Counter deltas are allocated proportionally across their observation window
   when calculating half-hour Agile costs. The calculation is therefore bounded
   by the 2-minute Zappi polling cadence rather than exact sub-minute metering.
-- Away charging is conservatively inferred only from a VW SoC rise of at least
-  5 percentage points while no home-Zappi connection is recorded. Energy is an
-  estimate from the Buzz GTX's 86 kWh battery; entries explicitly retain that
-  provenance. A rise of at least 20 points within an hour is classified as DC;
-  other qualifying rises are AC. AC uses the current UK Ofgem national-average
-  Direct Debit cap rate (26.11p/kWh for 1 July–30 September 2026); DC uses the
-  configured £0.75/kWh assumption. The `reconcile-away` workflow is idempotent
-  and is intended for controlled historical backfills.
-- Manual reconciliation, single-charge protection and control paths are not yet
-  implemented.
+- Away charging is inferred from a cumulative stationary VW SoC rise of at least
+  5 percentage points while no home-Zappi connection is recorded. A regressive
+  stationary SoC observation is retained for audit but excluded from inference.
+  A qualifying rise opens one provisional session only after two increasing VW
+  SoC observations, which is finalised only after the vehicle moves or SoC has
+  plateaued for one hour. Energy is an estimate from
+  the Buzz GTX's 86 kWh battery; entries explicitly retain that provenance. A
+  rise of at least 20 points within an hour is classified as DC; other qualifying
+  rises are AC. AC uses the current UK Ofgem national-average Direct Debit cap
+  rate (26.11p/kWh for 1 July–30 September 2026); DC uses the configured
+  £0.75/kWh assumption. The `reconcile-away` workflow is idempotent and is
+  intended for controlled historical backfills.
+- Manual reconciliation and control paths are not yet implemented.
 - The local API binds to loopback by default. Do not expose it publicly or
   commit credentials, token/cache files or SQLite ledger data.
 

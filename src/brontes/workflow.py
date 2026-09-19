@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Protocol
 
-from brontes.ledger import ChargingSession, Ledger, ZappiObservation
+from brontes.ledger import AwayChargeTracking, ChargingSession, Ledger, ZappiObservation
 from brontes.myenergi import ZappiTelemetry
 from brontes.vw import VehicleTelemetry
 
@@ -19,6 +19,8 @@ class HomeChargingWorkflow:
     """Aggregate Zappi intervals until an explicit home-session boundary."""
 
     _ZAPPI_CONFIRMATION_WINDOW = timedelta(minutes=5)
+    _AWAY_SOC_RISE_THRESHOLD = Decimal("5")
+    _AWAY_CHARGE_PLATEAU = timedelta(hours=1)
 
     def __init__(self, ledger: Ledger, rates: AgileRates) -> None:
         self._ledger = ledger
@@ -47,7 +49,6 @@ class HomeChargingWorkflow:
 
     def process_vehicle(self, telemetry: VehicleTelemetry) -> list[ChargingSession]:
         previous_odometer = self._ledger.latest_vehicle_odometer()
-        previous = self._ledger.latest_vehicle_observation_before(telemetry.source_timestamp)
         self._ledger.record_vehicle_observation(
             observed_at=telemetry.source_timestamp,
             soc_percent=telemetry.soc_percent,
@@ -59,27 +60,120 @@ class HomeChargingWorkflow:
                 odometer_miles=telemetry.odometer_miles,
             )
         completed = self._finalize_requested_session()
-        away_charge = self._detect_away_charge(previous, telemetry)
+        away_charge = self._process_away_charge(telemetry)
         return completed + ([away_charge] if away_charge is not None else [])
 
-    def _detect_away_charge(
-        self,
-        previous: tuple[datetime, Decimal, int] | None,
-        telemetry: VehicleTelemetry,
-    ) -> ChargingSession | None:
-        """Conservatively derive an away session from a substantial VW SoC rise."""
-        if previous is None:
+    def _process_away_charge(self, telemetry: VehicleTelemetry) -> ChargingSession | None:
+        """Track one credible stationary SoC rise until it reaches an end boundary."""
+        tracking = self._ledger.away_charge_tracking()
+        if tracking is None:
+            self._ledger.save_away_charge_tracking(self._new_away_tracking(telemetry))
             return None
-        previous_at, previous_soc, _ = previous
-        soc_rise = telemetry.soc_percent - previous_soc
-        if soc_rise < Decimal("5"):
+        if telemetry.source_timestamp <= tracking.last_observed_at:
+            return None
+
+        odometer_moved = telemetry.odometer_miles > tracking.last_odometer_miles
+        stationary_soc_regressed = (
+            telemetry.odometer_miles == tracking.last_odometer_miles
+            and telemetry.soc_percent < tracking.last_soc_percent
+        )
+        if telemetry.odometer_miles < tracking.last_odometer_miles or stationary_soc_regressed:
+            # VW can return an old SoC beside a current odometer. Keep it for audit,
+            # but never allow it to become the baseline of a new charge.
+            return None
+
+        if odometer_moved:
+            session = self._finalize_away_charge(tracking)
+            self._ledger.save_away_charge_tracking(self._new_away_tracking(telemetry))
+            return session
+
+        if tracking.charge_opened_at is not None:
+            if telemetry.soc_percent > tracking.last_soc_percent:
+                self._ledger.save_away_charge_tracking(
+                    self._with_last_observation(tracking, telemetry)
+                )
+                return None
+            if telemetry.source_timestamp - tracking.last_observed_at >= self._AWAY_CHARGE_PLATEAU:
+                session = self._finalize_away_charge(tracking)
+                self._ledger.save_away_charge_tracking(self._new_away_tracking(telemetry))
+                return session
+            return None
+
+        if telemetry.soc_percent - tracking.baseline_soc_percent < self._AWAY_SOC_RISE_THRESHOLD:
+            self._ledger.save_away_charge_tracking(
+                self._with_last_observation(tracking, telemetry)
+            )
             return None
         if self._ledger.home_was_connected_between(
-            previous_at - self._ZAPPI_CONFIRMATION_WINDOW,
+            tracking.baseline_at - self._ZAPPI_CONFIRMATION_WINDOW,
             telemetry.source_timestamp + self._ZAPPI_CONFIRMATION_WINDOW,
         ):
+            self._ledger.save_away_charge_tracking(self._new_away_tracking(telemetry))
             return None
-        elapsed = telemetry.source_timestamp - previous_at
+
+        self._ledger.save_away_charge_tracking(self._open_away_charge(tracking, telemetry))
+        return None
+
+    @staticmethod
+    def _open_away_charge(
+        tracking: AwayChargeTracking, telemetry: VehicleTelemetry
+    ) -> AwayChargeTracking:
+        return AwayChargeTracking(
+            baseline_at=tracking.baseline_at,
+            baseline_soc_percent=tracking.baseline_soc_percent,
+            baseline_odometer_miles=tracking.baseline_odometer_miles,
+            last_observed_at=telemetry.source_timestamp,
+            last_soc_percent=telemetry.soc_percent,
+            last_odometer_miles=telemetry.odometer_miles,
+            positive_soc_rises=tracking.positive_soc_rises + 1,
+            charge_opened_at=tracking.baseline_at,
+            charge_start_soc_percent=tracking.baseline_soc_percent,
+            charge_start_odometer_miles=tracking.baseline_odometer_miles,
+        )
+
+    @staticmethod
+    def _new_away_tracking(telemetry: VehicleTelemetry) -> AwayChargeTracking:
+        return AwayChargeTracking(
+            baseline_at=telemetry.source_timestamp,
+            baseline_soc_percent=telemetry.soc_percent,
+            baseline_odometer_miles=telemetry.odometer_miles,
+            last_observed_at=telemetry.source_timestamp,
+            last_soc_percent=telemetry.soc_percent,
+            last_odometer_miles=telemetry.odometer_miles,
+            positive_soc_rises=0,
+            charge_opened_at=None,
+            charge_start_soc_percent=None,
+            charge_start_odometer_miles=None,
+        )
+
+    @staticmethod
+    def _with_last_observation(
+        tracking: AwayChargeTracking, telemetry: VehicleTelemetry
+    ) -> AwayChargeTracking:
+        return AwayChargeTracking(
+            baseline_at=tracking.baseline_at,
+            baseline_soc_percent=tracking.baseline_soc_percent,
+            baseline_odometer_miles=tracking.baseline_odometer_miles,
+            last_observed_at=telemetry.source_timestamp,
+            last_soc_percent=telemetry.soc_percent,
+            last_odometer_miles=telemetry.odometer_miles,
+            positive_soc_rises=(
+                tracking.positive_soc_rises + 1
+                if telemetry.soc_percent > tracking.last_soc_percent
+                else tracking.positive_soc_rises
+            ),
+            charge_opened_at=tracking.charge_opened_at,
+            charge_start_soc_percent=tracking.charge_start_soc_percent,
+            charge_start_odometer_miles=tracking.charge_start_odometer_miles,
+        )
+
+    def _finalize_away_charge(self, tracking: AwayChargeTracking) -> ChargingSession | None:
+        if tracking.charge_opened_at is None or tracking.positive_soc_rises < 2:
+            return None
+        assert tracking.charge_start_soc_percent is not None
+        assert tracking.charge_start_odometer_miles is not None
+        soc_rise = tracking.last_soc_percent - tracking.charge_start_soc_percent
+        elapsed = tracking.last_observed_at - tracking.charge_opened_at
         charge_type = (
             "DC"
             if soc_rise >= Decimal("20") and elapsed <= timedelta(hours=1)
@@ -89,16 +183,17 @@ class HomeChargingWorkflow:
         energy = (soc_rise * Decimal("86") / Decimal("100")).quantize(Decimal("0.01"))
         return self._ledger.record_away_charge(
             source_key=(
-                f"vw-away:{previous_at.isoformat()}:{telemetry.source_timestamp.isoformat()}"
+                f"vw-away:{tracking.charge_opened_at.isoformat()}:"
+                f"{tracking.last_observed_at.isoformat()}"
             ),
-            opened_at=previous_at,
-            closed_at=telemetry.source_timestamp,
-            odometer_miles=telemetry.odometer_miles,
+            opened_at=tracking.charge_opened_at,
+            closed_at=tracking.last_observed_at,
+            odometer_miles=tracking.last_odometer_miles,
             energy_kwh=energy,
             unit_price_p_per_kwh=unit_price,
             charge_type=charge_type,
-            starting_soc_percent=previous_soc,
-            ending_soc_percent=telemetry.soc_percent,
+            starting_soc_percent=tracking.charge_start_soc_percent,
+            ending_soc_percent=tracking.last_soc_percent,
         )
 
     def reconcile_pending(self) -> list[ChargingSession]:
@@ -109,12 +204,10 @@ class HomeChargingWorkflow:
         """Backfill unrecorded away sessions from persisted telemetry history."""
         completed: list[ChargingSession] = []
         observations = self._ledger.vehicle_observations()
-        for previous, current in zip(observations, observations[1:]):
-            current_at, current_soc, current_odometer = current
+        for current_at, current_soc, current_odometer in observations:
             if start_at is not None and current_at < start_at:
                 continue
-            session = self._detect_away_charge(
-                previous,
+            session = self._process_away_charge(
                 VehicleTelemetry(
                     source_timestamp=current_at,
                     soc_percent=current_soc,
@@ -122,9 +215,9 @@ class HomeChargingWorkflow:
                     charging_state=None,
                     charge_type=None,
                     charge_power_kw=None,
-                ),
+                )
             )
-            if session is not None:
+            if session is not None and (start_at is None or current_at >= start_at):
                 completed.append(session)
         return completed
 

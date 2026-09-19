@@ -17,6 +17,7 @@ from brontes.roadtrip import (
 UTC = timezone.utc
 MONEY = Decimal("0.01")
 PRICE = Decimal("0.01")
+POST_CHARGE_VEHICLE_TELEMETRY_WINDOW = timedelta(minutes=30)
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,20 @@ class ZappiObservation:
     charging: bool
     power_kw: Decimal
     session_energy_kwh: Decimal | None
+
+
+@dataclass(frozen=True)
+class AwayChargeTracking:
+    baseline_at: datetime
+    baseline_soc_percent: Decimal
+    baseline_odometer_miles: int
+    last_observed_at: datetime
+    last_soc_percent: Decimal
+    last_odometer_miles: int
+    positive_soc_rises: int
+    charge_opened_at: datetime | None
+    charge_start_soc_percent: Decimal | None
+    charge_start_odometer_miles: int | None
 
 
 def _utc_iso(value: datetime) -> str:
@@ -161,8 +176,29 @@ class Ledger:
                 source_key TEXT PRIMARY KEY,
                 session_id INTEGER NOT NULL UNIQUE REFERENCES charging_sessions(id)
             );
+            CREATE TABLE IF NOT EXISTS away_charge_tracking (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                baseline_at TEXT NOT NULL,
+                baseline_soc_percent TEXT NOT NULL,
+                baseline_odometer_miles INTEGER NOT NULL,
+                last_observed_at TEXT NOT NULL,
+                last_soc_percent TEXT NOT NULL,
+                last_odometer_miles INTEGER NOT NULL,
+                positive_soc_rises INTEGER NOT NULL,
+                charge_opened_at TEXT,
+                charge_start_soc_percent TEXT,
+                charge_start_odometer_miles INTEGER
+            );
             """
         )
+        columns = {
+            row[1]
+            for row in self._connection.execute("PRAGMA table_info(away_charge_tracking)")
+        }
+        if "positive_soc_rises" not in columns:
+            self._connection.execute(
+                "ALTER TABLE away_charge_tracking ADD COLUMN positive_soc_rises INTEGER NOT NULL DEFAULT 0"
+            )
         self._connection.commit()
 
     def record_vehicle_observation(
@@ -290,6 +326,73 @@ class Ledger:
             for row in rows
         ]
 
+    def away_charge_tracking(self) -> AwayChargeTracking | None:
+        row = self._connection.execute(
+            """SELECT baseline_at, baseline_soc_percent, baseline_odometer_miles,
+            last_observed_at, last_soc_percent, last_odometer_miles, positive_soc_rises,
+            charge_opened_at, charge_start_soc_percent, charge_start_odometer_miles
+            FROM away_charge_tracking WHERE id = 1"""
+        ).fetchone()
+        if row is None:
+            return None
+        return AwayChargeTracking(
+            baseline_at=_parse_utc(row["baseline_at"]),
+            baseline_soc_percent=_decimal(row["baseline_soc_percent"]),
+            baseline_odometer_miles=int(row["baseline_odometer_miles"]),
+            last_observed_at=_parse_utc(row["last_observed_at"]),
+            last_soc_percent=_decimal(row["last_soc_percent"]),
+            last_odometer_miles=int(row["last_odometer_miles"]),
+            positive_soc_rises=int(row["positive_soc_rises"]),
+            charge_opened_at=(
+                _parse_utc(row["charge_opened_at"])
+                if row["charge_opened_at"] is not None
+                else None
+            ),
+            charge_start_soc_percent=(
+                _decimal(row["charge_start_soc_percent"])
+                if row["charge_start_soc_percent"] is not None
+                else None
+            ),
+            charge_start_odometer_miles=(
+                int(row["charge_start_odometer_miles"])
+                if row["charge_start_odometer_miles"] is not None
+                else None
+            ),
+        )
+
+    def save_away_charge_tracking(self, tracking: AwayChargeTracking) -> None:
+        self._connection.execute(
+            """INSERT INTO away_charge_tracking(
+                id, baseline_at, baseline_soc_percent, baseline_odometer_miles,
+                last_observed_at, last_soc_percent, last_odometer_miles, positive_soc_rises,
+                charge_opened_at, charge_start_soc_percent, charge_start_odometer_miles
+            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                baseline_at = excluded.baseline_at,
+                baseline_soc_percent = excluded.baseline_soc_percent,
+                baseline_odometer_miles = excluded.baseline_odometer_miles,
+                last_observed_at = excluded.last_observed_at,
+                last_soc_percent = excluded.last_soc_percent,
+                last_odometer_miles = excluded.last_odometer_miles,
+                positive_soc_rises = excluded.positive_soc_rises,
+                charge_opened_at = excluded.charge_opened_at,
+                charge_start_soc_percent = excluded.charge_start_soc_percent,
+                charge_start_odometer_miles = excluded.charge_start_odometer_miles
+            """,
+            (
+                _utc_iso(tracking.baseline_at), str(tracking.baseline_soc_percent),
+                tracking.baseline_odometer_miles, _utc_iso(tracking.last_observed_at),
+                str(tracking.last_soc_percent), tracking.last_odometer_miles,
+                tracking.positive_soc_rises,
+                _utc_iso(tracking.charge_opened_at) if tracking.charge_opened_at else None,
+                str(tracking.charge_start_soc_percent)
+                if tracking.charge_start_soc_percent is not None
+                else None,
+                tracking.charge_start_odometer_miles,
+            ),
+        )
+        self._connection.commit()
+
     def home_was_connected_between(self, start: datetime, end: datetime) -> bool:
         row = self._connection.execute(
             """SELECT 1 FROM zappi_observations
@@ -411,7 +514,7 @@ class Ledger:
             ORDER BY observed_at
             LIMIT 1
             """,
-            (_utc_iso(charge_ended_at), _utc_iso(charge_ended_at + timedelta(minutes=15))),
+            (_utc_iso(charge_ended_at), _utc_iso(charge_ended_at + POST_CHARGE_VEHICLE_TELEMETRY_WINDOW)),
         ).fetchone()
         if row is None:
             return None

@@ -111,6 +111,25 @@ class HomeChargingWorkflowTests(unittest.TestCase):
 
         self.assertIn("filled=1", self.ledger.pending_notifications()[0].roadtrip_callback)
 
+    def test_roadtrip_callback_accepts_vehicle_telemetry_from_the_next_poll_cycle(self) -> None:
+        self.ledger.record_home_interval(
+            source_key="zappi-001",
+            started_at=at(1),
+            ended_at=at(1, 30),
+            energy_kwh=Decimal("10.0"),
+        )
+        self.ledger.record_agile_price(
+            settlement_start=at(1), unit_price_p_per_kwh=Decimal("5")
+        )
+        self.ledger.record_vehicle_observation(
+            observed_at=at(1, 46), soc_percent=Decimal("97"), odometer_miles=18742
+        )
+
+        sessions = self.ledger.reconcile_odometer_change(observed_at=at(8), odometer_miles=18742)
+
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(self.ledger.pending_notification_count(), 1)
+
     def test_roadtrip_callback_requires_a_timely_post_charge_soc_for_filled_state(self) -> None:
         self.ledger.record_home_interval(
             source_key="zappi-001",

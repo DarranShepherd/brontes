@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -28,6 +29,34 @@ def _vehicle(timestamp: datetime, soc: str, odometer: int) -> VehicleTelemetry:
 
 
 class AwayChargingWorkflowTests(unittest.TestCase):
+    def test_migrates_existing_away_charge_tracking_table(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "brontes.sqlite3"
+            connection = sqlite3.connect(database_path)
+            try:
+                connection.execute("""CREATE TABLE away_charge_tracking (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    baseline_at TEXT NOT NULL,
+                    baseline_soc_percent TEXT NOT NULL,
+                    baseline_odometer_miles INTEGER NOT NULL,
+                    last_observed_at TEXT NOT NULL,
+                    last_soc_percent TEXT NOT NULL,
+                    last_odometer_miles INTEGER NOT NULL,
+                    charge_opened_at TEXT,
+                    charge_start_soc_percent TEXT,
+                    charge_start_odometer_miles INTEGER
+                )""")
+                connection.commit()
+            finally:
+                connection.close()
+
+            ledger = Ledger(database_path)
+            try:
+                columns = {row[1] for row in ledger._connection.execute("PRAGMA table_info(away_charge_tracking)")}
+                self.assertIn("positive_soc_rises", columns)
+            finally:
+                ledger.close()
+
     def test_creates_ac_and_dc_away_sessions_from_confirmed_soc_rises(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             ledger = Ledger(Path(directory) / "brontes.sqlite3")
@@ -35,11 +64,15 @@ class AwayChargingWorkflowTests(unittest.TestCase):
                 workflow = HomeChargingWorkflow(ledger, _Rates())
                 samples = [
                     _vehicle(datetime(2026, 9, 12, 10, 36, tzinfo=UTC), "27", 19285),
+                    _vehicle(datetime(2026, 9, 12, 12, 30, tzinfo=UTC), "31", 19285),
                     _vehicle(datetime(2026, 9, 12, 14, 57, tzinfo=UTC), "36", 19285),
                     _vehicle(datetime(2026, 9, 13, 10, 29, tzinfo=UTC), "25", 19306),
+                    _vehicle(datetime(2026, 9, 13, 10, 55, tzinfo=UTC), "30", 19306),
                     _vehicle(datetime(2026, 9, 13, 11, 25, tzinfo=UTC), "36", 19306),
                     _vehicle(datetime(2026, 9, 13, 18, 21, tzinfo=UTC), "26", 19312),
-                    _vehicle(datetime(2026, 9, 13, 18, 48, tzinfo=UTC), "55", 19321),
+                    _vehicle(datetime(2026, 9, 13, 18, 35, tzinfo=UTC), "40", 19312),
+                    _vehicle(datetime(2026, 9, 13, 18, 48, tzinfo=UTC), "55", 19312),
+                    _vehicle(datetime(2026, 9, 13, 19, 48, tzinfo=UTC), "55", 19321),
                 ]
 
                 completed = []
@@ -68,6 +101,80 @@ class AwayChargingWorkflowTests(unittest.TestCase):
             finally:
                 ledger.close()
 
+    def test_ignores_stationary_regressive_soc_before_a_repeated_value(self) -> None:
+        """A stale VW response must not turn a prior SoC into a phantom charge."""
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Ledger(Path(directory) / "brontes.sqlite3")
+            try:
+                workflow = HomeChargingWorkflow(ledger, _Rates())
+                samples = [
+                    _vehicle(datetime(2026, 9, 18, 16, 48, tzinfo=UTC), "35", 19614),
+                    _vehicle(datetime(2026, 9, 18, 16, 55, tzinfo=UTC), "26", 19614),
+                    _vehicle(datetime(2026, 9, 18, 17, 12, tzinfo=UTC), "35", 19614),
+                ]
+
+                completed = []
+                for sample in samples:
+                    completed.extend(workflow.process_vehicle(sample))
+
+                self.assertEqual(completed, [])
+                self.assertEqual(ledger.pending_notification_count(), 0)
+            finally:
+                ledger.close()
+
+    def test_ignores_stale_soc_across_a_short_drive(self) -> None:
+        """A stale reading must remain rejected when it survives into a later odometer value."""
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Ledger(Path(directory) / "brontes.sqlite3")
+            try:
+                workflow = HomeChargingWorkflow(ledger, _Rates())
+                samples = [
+                    _vehicle(datetime(2026, 9, 18, 16, 48, tzinfo=UTC), "35", 19603),
+                    _vehicle(datetime(2026, 9, 18, 16, 55, tzinfo=UTC), "26", 19603),
+                    _vehicle(datetime(2026, 9, 18, 17, 58, tzinfo=UTC), "26", 19614),
+                    _vehicle(datetime(2026, 9, 18, 18, 12, tzinfo=UTC), "35", 19614),
+                    _vehicle(datetime(2026, 9, 18, 18, 34, tzinfo=UTC), "35", 19614),
+                    _vehicle(datetime(2026, 9, 18, 19, 34, tzinfo=UTC), "35", 19614),
+                ]
+
+                completed = []
+                for sample in samples:
+                    completed.extend(workflow.process_vehicle(sample))
+
+                self.assertEqual(completed, [])
+                self.assertEqual(ledger.pending_notification_count(), 0)
+            finally:
+                ledger.close()
+
+    def test_combines_one_away_charge_and_notifies_only_after_a_plateau(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Ledger(Path(directory) / "brontes.sqlite3")
+            try:
+                workflow = HomeChargingWorkflow(ledger, _Rates())
+                started_at = datetime(2026, 9, 19, 1, tzinfo=UTC)
+                charging_samples = [
+                    _vehicle(started_at, "35", 19614),
+                    _vehicle(started_at.replace(hour=1, minute=30), "38", 19614),
+                    _vehicle(started_at.replace(hour=2), "41", 19614),
+                    _vehicle(started_at.replace(hour=3), "45", 19614),
+                    _vehicle(started_at.replace(hour=4), "50", 19614),
+                ]
+                for sample in charging_samples:
+                    self.assertEqual(workflow.process_vehicle(sample), [])
+                self.assertEqual(ledger.pending_notification_count(), 0)
+
+                completed = workflow.process_vehicle(
+                    _vehicle(started_at.replace(hour=5), "50", 19614)
+                )
+
+                self.assertEqual(len(completed), 1)
+                self.assertEqual(completed[0].energy_kwh, Decimal("12.90"))
+                notifications = ledger.pending_notifications()
+                self.assertEqual(len(notifications), 1)
+                self.assertIn("VW SoC: 35% → 50%", notifications[0].message)
+            finally:
+                ledger.close()
+
     def test_reconciles_historical_telemetry_once(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             ledger = Ledger(Path(directory) / "brontes.sqlite3")
@@ -85,7 +192,15 @@ class AwayChargingWorkflowTests(unittest.TestCase):
                     soc_percent=Decimal("25"), odometer_miles=19000,
                 )
                 ledger.record_vehicle_observation(
+                    observed_at=datetime(2026, 9, 12, 12, tzinfo=UTC),
+                    soc_percent=Decimal("30"), odometer_miles=19000,
+                )
+                ledger.record_vehicle_observation(
                     observed_at=datetime(2026, 9, 12, 14, tzinfo=UTC),
+                    soc_percent=Decimal("35"), odometer_miles=19000,
+                )
+                ledger.record_vehicle_observation(
+                    observed_at=datetime(2026, 9, 12, 15, tzinfo=UTC),
                     soc_percent=Decimal("35"), odometer_miles=19000,
                 )
                 workflow = HomeChargingWorkflow(ledger, _Rates())

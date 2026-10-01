@@ -146,6 +146,34 @@ class AwayChargingWorkflowTests(unittest.TestCase):
             finally:
                 ledger.close()
 
+    def test_recovers_a_confirmed_stationary_soc_drop_before_a_dc_charge(self) -> None:
+        """A long-delayed high VW snapshot must not hide a later confirmed charge baseline."""
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Ledger(Path(directory) / "brontes.sqlite3")
+            try:
+                workflow = HomeChargingWorkflow(ledger, _Rates())
+                samples = [
+                    _vehicle(datetime(2026, 9, 20, 14, 44, 51, tzinfo=UTC), "53", 19670),
+                    _vehicle(datetime(2026, 9, 20, 16, 19, 27, tzinfo=UTC), "26", 19670),
+                    _vehicle(datetime(2026, 9, 20, 17, 12, 54, tzinfo=UTC), "26", 19670),
+                    _vehicle(datetime(2026, 9, 20, 17, 21, 16, tzinfo=UTC), "53", 19670),
+                    _vehicle(datetime(2026, 9, 20, 18, 2, tzinfo=UTC), "26", 19670),
+                    _vehicle(datetime(2026, 9, 20, 19, 44, 21, tzinfo=UTC), "55", 19695),
+                ]
+
+                completed = []
+                for sample in samples:
+                    completed.extend(workflow.process_vehicle(sample))
+
+                self.assertEqual(len(completed), 1)
+                self.assertEqual(completed[0].energy_kwh, Decimal("23.22"))
+                self.assertEqual(completed[0].total_cost_gbp, Decimal("17.42"))
+                notification = ledger.pending_notifications()[0]
+                self.assertIn("VW SoC: 26% → 53%", notification.message)
+                self.assertIn("Away · DC · estimated", notification.message)
+            finally:
+                ledger.close()
+
     def test_combines_one_away_charge_and_notifies_only_after_a_plateau(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             ledger = Ledger(Path(directory) / "brontes.sqlite3")

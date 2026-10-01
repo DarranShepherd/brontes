@@ -21,6 +21,8 @@ class HomeChargingWorkflow:
     _ZAPPI_CONFIRMATION_WINDOW = timedelta(minutes=5)
     _AWAY_SOC_RISE_THRESHOLD = Decimal("5")
     _AWAY_CHARGE_PLATEAU = timedelta(hours=1)
+    _STALE_SOC_REBASE_DELAY = timedelta(hours=1)
+    _DC_CHARGE_WINDOW = timedelta(minutes=90)
 
     def __init__(self, ledger: Ledger, rates: AgileRates) -> None:
         self._ledger = ledger
@@ -63,6 +65,26 @@ class HomeChargingWorkflow:
         away_charge = self._process_away_charge(telemetry)
         return completed + ([away_charge] if away_charge is not None else [])
 
+    def finalise_manual_home(
+        self, *, observed_at: datetime, soc_percent: Decimal, odometer_miles: int
+    ) -> list[ChargingSession]:
+        """Finalise only a pending home session from user-attested vehicle state."""
+        self._ledger.record_vehicle_observation(
+            observed_at=observed_at,
+            soc_percent=soc_percent,
+            odometer_miles=odometer_miles,
+        )
+        closure = self._ledger.requested_home_session_closure()
+        if closure is None:
+            return []
+        sessions = self._ledger.reconcile_odometer_change(
+            observed_at=observed_at,
+            odometer_miles=odometer_miles,
+            allow_late_post_charge_observation=True,
+        )
+        self._ledger.clear_home_session_closure()
+        return sessions
+
     def _process_away_charge(self, telemetry: VehicleTelemetry) -> ChargingSession | None:
         """Track one credible stationary SoC rise until it reaches an end boundary."""
         tracking = self._ledger.away_charge_tracking()
@@ -77,9 +99,15 @@ class HomeChargingWorkflow:
             telemetry.odometer_miles == tracking.last_odometer_miles
             and telemetry.soc_percent < tracking.last_soc_percent
         )
-        if telemetry.odometer_miles < tracking.last_odometer_miles or stationary_soc_regressed:
-            # VW can return an old SoC beside a current odometer. Keep it for audit,
-            # but never allow it to become the baseline of a new charge.
+        if telemetry.odometer_miles < tracking.last_odometer_miles:
+            return None
+        if stationary_soc_regressed:
+            # A brief lower SoC is usually a delayed VW response.  If the prior
+            # stationary reading is already over an hour old, retain the lower
+            # reading as a new candidate baseline; a subsequent identical reading
+            # is still required before a one-rise charge can be finalised.
+            if telemetry.source_timestamp - tracking.last_observed_at >= self._STALE_SOC_REBASE_DELAY:
+                self._ledger.save_away_charge_tracking(self._new_away_tracking(telemetry))
             return None
 
         if odometer_moved:
@@ -118,6 +146,11 @@ class HomeChargingWorkflow:
     def _open_away_charge(
         tracking: AwayChargeTracking, telemetry: VehicleTelemetry
     ) -> AwayChargeTracking:
+        baseline_was_confirmed = (
+            tracking.last_observed_at > tracking.baseline_at
+            and tracking.last_soc_percent == tracking.baseline_soc_percent
+            and tracking.last_odometer_miles == tracking.baseline_odometer_miles
+        )
         return AwayChargeTracking(
             baseline_at=tracking.baseline_at,
             baseline_soc_percent=tracking.baseline_soc_percent,
@@ -125,7 +158,10 @@ class HomeChargingWorkflow:
             last_observed_at=telemetry.source_timestamp,
             last_soc_percent=telemetry.soc_percent,
             last_odometer_miles=telemetry.odometer_miles,
-            positive_soc_rises=tracking.positive_soc_rises + 1,
+            # Two observed SoC rises are normally required.  A repeated,
+            # stationary baseline provides equivalent confirmation when VW only
+            # emits one higher snapshot before the car departs.
+            positive_soc_rises=tracking.positive_soc_rises + (2 if baseline_was_confirmed else 1),
             charge_opened_at=tracking.baseline_at,
             charge_start_soc_percent=tracking.baseline_soc_percent,
             charge_start_odometer_miles=tracking.baseline_odometer_miles,
@@ -176,7 +212,7 @@ class HomeChargingWorkflow:
         elapsed = tracking.last_observed_at - tracking.charge_opened_at
         charge_type = (
             "DC"
-            if soc_rise >= Decimal("20") and elapsed <= timedelta(hours=1)
+            if soc_rise >= Decimal("20") and elapsed <= self._DC_CHARGE_WINDOW
             else "AC"
         )
         unit_price = Decimal("75.00") if charge_type == "DC" else Decimal("26.11")

@@ -30,8 +30,8 @@ MyEnergi:
   Europe/London local `YYYY-MM-DD HH:MM` timestamp, and an HTTPS handoff that
   Telegram can open.
 
-The service does not currently control Volkswagen, Zappi, MyEnergi schedules,
-or Telegram directly. It does not use an LLM in its decision path.
+- An explicit user-authorised charge intent can read fresh VW SoC, deterministically choose up to four lowest-cost Agile timed-boost windows, apply them through MyEnergi with asynchronous read-back verification, and persist the intent for safe replanning.
+- It does not control Volkswagen or Telegram directly. It does not use an LLM in its decision path.
 
 ## Charging-session lifecycles
 

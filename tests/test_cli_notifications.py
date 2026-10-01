@@ -54,6 +54,7 @@ class HermesCliNotificationDispatcherTests(unittest.TestCase):
                 self.assertEqual(dispatcher.deliver_pending(), 1)
                 self.assertEqual(ledger.pending_alerts(), [])
                 self.assertIn("failed 3 consecutive times", commands[0][-1])
+                self.assertIn("https://eu-data-act.drivesomethinggreater.com", commands[0][-1])
             finally:
                 ledger.close()
 

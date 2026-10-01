@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -67,6 +68,14 @@ class AwayChargeTracking:
     charge_opened_at: datetime | None
     charge_start_soc_percent: Decimal | None
     charge_start_odometer_miles: int | None
+
+
+@dataclass(frozen=True)
+class ChargeIntent:
+    target_soc_percent: Decimal
+    requested_deadline: datetime | None
+    planned_until: datetime
+    planned_slots: tuple[datetime, ...]
 
 
 def _utc_iso(value: datetime) -> str:
@@ -176,6 +185,10 @@ class Ledger:
                 source_key TEXT PRIMARY KEY,
                 session_id INTEGER NOT NULL UNIQUE REFERENCES charging_sessions(id)
             );
+            CREATE TABLE IF NOT EXISTS reconciled_charge_imports (
+                source_key TEXT PRIMARY KEY,
+                session_id INTEGER NOT NULL UNIQUE REFERENCES charging_sessions(id)
+            );
             CREATE TABLE IF NOT EXISTS away_charge_tracking (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 baseline_at TEXT NOT NULL,
@@ -188,6 +201,13 @@ class Ledger:
                 charge_opened_at TEXT,
                 charge_start_soc_percent TEXT,
                 charge_start_odometer_miles INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS charge_intent (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                target_soc_percent TEXT NOT NULL,
+                requested_deadline TEXT,
+                planned_until TEXT NOT NULL,
+                planned_slots_json TEXT NOT NULL
             );
             """
         )
@@ -299,6 +319,41 @@ class Ledger:
             "SELECT odometer_miles FROM vehicle_observations ORDER BY observed_at DESC LIMIT 1"
         ).fetchone()
         return int(row["odometer_miles"]) if row is not None else None
+
+    def latest_vehicle_observation(self) -> tuple[datetime, Decimal, int] | None:
+        row = self._connection.execute(
+            "SELECT observed_at, soc_percent, odometer_miles FROM vehicle_observations ORDER BY observed_at DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        return _parse_utc(row["observed_at"]), _decimal(row["soc_percent"]), int(row["odometer_miles"])
+
+    def save_charge_intent(self, intent: ChargeIntent) -> None:
+        self._connection.execute(
+            """INSERT INTO charge_intent(id, target_soc_percent, requested_deadline, planned_until, planned_slots_json)
+            VALUES(1, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET target_soc_percent=excluded.target_soc_percent,
+            requested_deadline=excluded.requested_deadline, planned_until=excluded.planned_until,
+            planned_slots_json=excluded.planned_slots_json""",
+            (str(intent.target_soc_percent), _utc_iso(intent.requested_deadline) if intent.requested_deadline else None,
+             _utc_iso(intent.planned_until), json.dumps([_utc_iso(value) for value in intent.planned_slots])),
+        )
+        self._connection.commit()
+
+    def charge_intent(self) -> ChargeIntent | None:
+        row = self._connection.execute("SELECT * FROM charge_intent WHERE id=1").fetchone()
+        if row is None:
+            return None
+        return ChargeIntent(
+            target_soc_percent=_decimal(row["target_soc_percent"]),
+            requested_deadline=_parse_utc(row["requested_deadline"]) if row["requested_deadline"] else None,
+            planned_until=_parse_utc(row["planned_until"]),
+            planned_slots=tuple(_parse_utc(value) for value in json.loads(row["planned_slots_json"])),
+        )
+
+    def clear_charge_intent(self) -> None:
+        self._connection.execute("DELETE FROM charge_intent WHERE id=1")
+        self._connection.commit()
 
     def latest_vehicle_observation_before(
         self, observed_at: datetime
@@ -474,6 +529,124 @@ class Ledger:
             cost_source="assumed_unit_price",
         )
 
+    def import_reconciled_charge(
+        self,
+        *,
+        source_key: str,
+        opened_at: datetime,
+        closed_at: datetime,
+        odometer_miles: int,
+        energy_kwh: Decimal,
+        total_cost_gbp: Decimal,
+        weighted_unit_price_p_per_kwh: Decimal,
+        location_type: str,
+        energy_source: str,
+        cost_source: str,
+        assign_intervals_started_at: datetime | None = None,
+        assign_intervals_ended_at: datetime | None = None,
+    ) -> ChargingSession | None:
+        """Import an already-reconciled charge without creating a notification."""
+        if closed_at <= opened_at:
+            raise ValueError("charge end must be later than start")
+        if energy_kwh <= 0:
+            raise ValueError("energy must be positive")
+        if self._connection.execute(
+            "SELECT 1 FROM reconciled_charge_imports WHERE source_key = ?", (source_key,)
+        ).fetchone() is not None:
+            return None
+        if (assign_intervals_started_at is None) != (assign_intervals_ended_at is None):
+            raise ValueError("both interval assignment boundaries are required")
+
+        cursor = self._connection.execute(
+            """INSERT INTO charging_sessions(
+                opened_at, closed_at, odometer_miles, location_type, total_energy_kwh,
+                total_cost_gbp, weighted_unit_price_p_per_kwh, energy_source, cost_source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                _utc_iso(opened_at), _utc_iso(closed_at), odometer_miles, location_type,
+                str(energy_kwh), str(total_cost_gbp), str(weighted_unit_price_p_per_kwh),
+                energy_source, cost_source,
+            ),
+        )
+        session_id = int(cursor.lastrowid)
+        self._connection.execute(
+            "INSERT INTO reconciled_charge_imports(source_key, session_id) VALUES (?, ?)",
+            (source_key, session_id),
+        )
+        if assign_intervals_started_at is not None:
+            self._connection.execute(
+                """UPDATE charging_intervals SET session_id = ?
+                WHERE location_type = 'home' AND session_id IS NULL
+                AND started_at >= ? AND ended_at <= ?""",
+                (session_id, _utc_iso(assign_intervals_started_at), _utc_iso(assign_intervals_ended_at)),
+            )
+        self._connection.commit()
+        return ChargingSession(
+            id=session_id,
+            energy_kwh=energy_kwh,
+            total_cost_gbp=total_cost_gbp,
+            weighted_unit_price_p_per_kwh=weighted_unit_price_p_per_kwh,
+            location_type=location_type,
+            energy_source=energy_source,
+            cost_source=cost_source,
+        )
+
+    def reconcile_charge_from_receipt(
+        self,
+        *,
+        session_id: int,
+        energy_kwh: Decimal,
+        total_cost_gbp: Decimal,
+        weighted_unit_price_p_per_kwh: Decimal,
+        energy_source: str,
+        cost_source: str,
+        opened_at: datetime | None = None,
+        closed_at: datetime | None = None,
+    ) -> ChargingSession:
+        """Replace an inferred charge's values with an authoritative receipt."""
+        if energy_kwh <= 0:
+            raise ValueError("energy must be positive")
+        if (opened_at is None) != (closed_at is None):
+            raise ValueError("both receipt timestamps are required")
+        if opened_at is not None and closed_at is not None and closed_at <= opened_at:
+            raise ValueError("charge end must be later than start")
+        row = self._connection.execute(
+            "SELECT location_type FROM charging_sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"unknown charging session: {session_id}")
+        if opened_at is None:
+            self._connection.execute(
+                """UPDATE charging_sessions SET total_energy_kwh = ?, total_cost_gbp = ?,
+                weighted_unit_price_p_per_kwh = ?, energy_source = ?, cost_source = ?
+                WHERE id = ?""",
+                (
+                    str(energy_kwh), str(total_cost_gbp), str(weighted_unit_price_p_per_kwh),
+                    energy_source, cost_source, session_id,
+                ),
+            )
+        else:
+            assert closed_at is not None
+            self._connection.execute(
+                """UPDATE charging_sessions SET opened_at = ?, closed_at = ?, total_energy_kwh = ?,
+                total_cost_gbp = ?, weighted_unit_price_p_per_kwh = ?, energy_source = ?,
+                cost_source = ? WHERE id = ?""",
+                (
+                    _utc_iso(opened_at), _utc_iso(closed_at), str(energy_kwh), str(total_cost_gbp),
+                    str(weighted_unit_price_p_per_kwh), energy_source, cost_source, session_id,
+                ),
+            )
+        self._connection.commit()
+        return ChargingSession(
+            id=session_id,
+            energy_kwh=energy_kwh,
+            total_cost_gbp=total_cost_gbp,
+            weighted_unit_price_p_per_kwh=weighted_unit_price_p_per_kwh,
+            location_type=row["location_type"],
+            energy_source=energy_source,
+            cost_source=cost_source,
+        )
+
     def request_home_session_closure(self, *, requested_at: datetime, odometer_miles: int) -> None:
         self._connection.execute(
             """INSERT INTO home_session_closure(id, requested_at, odometer_miles)
@@ -505,23 +678,38 @@ class Ledger:
                 "powerKw": row["power_kw"]}
 
     def _first_vehicle_observation_after_charge(
-        self, charge_ended_at: datetime
+        self, charge_ended_at: datetime, *, allow_late: bool = False
     ) -> tuple[Decimal, int] | None:
-        row = self._connection.execute(
-            """
-            SELECT soc_percent, odometer_miles FROM vehicle_observations
-            WHERE observed_at >= ? AND observed_at <= ?
-            ORDER BY observed_at
-            LIMIT 1
-            """,
-            (_utc_iso(charge_ended_at), _utc_iso(charge_ended_at + POST_CHARGE_VEHICLE_TELEMETRY_WINDOW)),
-        ).fetchone()
+        if allow_late:
+            row = self._connection.execute(
+                """
+                SELECT soc_percent, odometer_miles FROM vehicle_observations
+                WHERE observed_at >= ?
+                ORDER BY observed_at DESC
+                LIMIT 1
+                """,
+                (_utc_iso(charge_ended_at),),
+            ).fetchone()
+        else:
+            row = self._connection.execute(
+                """
+                SELECT soc_percent, odometer_miles FROM vehicle_observations
+                WHERE observed_at >= ? AND observed_at <= ?
+                ORDER BY observed_at
+                LIMIT 1
+                """,
+                (_utc_iso(charge_ended_at), _utc_iso(charge_ended_at + POST_CHARGE_VEHICLE_TELEMETRY_WINDOW)),
+            ).fetchone()
         if row is None:
             return None
         return _decimal(row["soc_percent"]), int(row["odometer_miles"])
 
     def reconcile_odometer_change(
-        self, *, observed_at: datetime, odometer_miles: int
+        self,
+        *,
+        observed_at: datetime,
+        odometer_miles: int,
+        allow_late_post_charge_observation: bool = False,
     ) -> list[ChargingSession]:
         """Close unassigned home intervals after a later odometer observation."""
         intervals = self._connection.execute(
@@ -543,7 +731,8 @@ class Ledger:
         charge_ended_at = intervals[-1]["ended_at"]
         closed_at = _utc_iso(observed_at)
         ending_vehicle = self._first_vehicle_observation_after_charge(
-            _parse_utc(charge_ended_at)
+            _parse_utc(charge_ended_at),
+            allow_late=allow_late_post_charge_observation,
         )
         if ending_vehicle is None:
             raise ValueError("missing timely post-charge vehicle observation")
@@ -670,7 +859,11 @@ class Ledger:
         if should_alert:
             self._connection.execute(
                 "INSERT INTO alerts(message) VALUES (?)",
-                (f"VW telemetry polling has failed {failures} consecutive times. Check CarConnectivity authentication.",),
+                (
+                    "VW telemetry polling has failed "
+                    f"{failures} consecutive times. Check CarConnectivity authentication. "
+                    "Test login: https://eu-data-act.drivesomethinggreater.com",
+                ),
             )
         previous_alert_at = row["last_failure_alert_at"] if row is not None else None
         self._connection.execute(

@@ -149,6 +149,22 @@ class HomeChargingWorkflowTests(unittest.TestCase):
 
         self.assertEqual(self.ledger.pending_notification_count(), 0)
 
+    def test_user_attested_post_charge_state_can_finalise_after_the_telemetry_window(self) -> None:
+        self.ledger.record_home_interval(
+            source_key="zappi-001", started_at=at(1), ended_at=at(1, 30), energy_kwh=Decimal("10.0")
+        )
+        self.ledger.record_agile_price(settlement_start=at(1), unit_price_p_per_kwh=Decimal("5"))
+        self.ledger.record_vehicle_observation(
+            observed_at=at(3), soc_percent=Decimal("81"), odometer_miles=18742
+        )
+
+        sessions = self.ledger.reconcile_odometer_change(
+            observed_at=at(3), odometer_miles=18742, allow_late_post_charge_observation=True
+        )
+
+        self.assertEqual(len(sessions), 1)
+        self.assertIn("filled=1", self.ledger.pending_notifications()[0].roadtrip_callback)
+
     def test_repeated_zappi_interval_source_key_does_not_double_count(self) -> None:
         self.ledger.record_home_interval(
             source_key="zappi-001",

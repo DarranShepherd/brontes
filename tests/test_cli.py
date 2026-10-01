@@ -2,7 +2,12 @@ import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from brontes.cli import execute_poll, execute_reconcile, execute_reconcile_away
+from brontes.cli import (
+    execute_manual_home_finalise,
+    execute_poll,
+    execute_reconcile,
+    execute_reconcile_away,
+)
 from brontes.myenergi import ZappiTelemetry
 from brontes.vw import VehicleTelemetry
 
@@ -26,6 +31,10 @@ class _Workflow:
     def reconcile_away(self):
         self.events.append(("reconcile-away",))
         return ["session", "session"]
+
+    def finalise_manual_home(self, *, observed_at, soc_percent, odometer_miles):
+        self.events.append(("manual-home-finalise", observed_at, soc_percent, odometer_miles))
+        return ["session"]
 
 
 class _Dispatcher:
@@ -65,6 +74,26 @@ class CliCommandTests(unittest.TestCase):
 
         self.assertEqual(result, {"sessionsFinalised": 1, "notificationsDelivered": 2})
         self.assertEqual(workflow.events, [("reconcile",)])
+        self.assertEqual(dispatcher.calls, 1)
+
+    def test_manual_home_finalisation_uses_attested_vehicle_state_and_delivers_notification(self) -> None:
+        workflow = _Workflow()
+        dispatcher = _Dispatcher()
+        when = datetime(2026, 9, 30, 15, 30, tzinfo=timezone.utc)
+
+        result = execute_manual_home_finalise(
+            workflow=workflow,
+            dispatcher=dispatcher,
+            observed_at=when,
+            soc_percent=Decimal("81"),
+            odometer_miles=20178,
+        )
+
+        self.assertEqual(result, {"sessionsFinalised": 1, "notificationsDelivered": 2})
+        self.assertEqual(
+            workflow.events,
+            [("manual-home-finalise", when, Decimal("81"), 20178)],
+        )
         self.assertEqual(dispatcher.calls, 1)
 
     def test_reconcile_away_backfills_candidates_and_delivers_notifications(self) -> None:
